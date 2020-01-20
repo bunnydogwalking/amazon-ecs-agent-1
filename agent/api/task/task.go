@@ -1458,6 +1458,11 @@ func (task *Task) dockerHostConfig(container *apicontainer.Container, dockerCont
 		Resources:    resources,
 	}
 
+	oos_kill_disable, prs := container.Environment["DOCKER_OOS_KILL_DISABLE"]
+	if prs && oos_kill_disable == "true" {
+		hostConfig.OomKillDisable = aws.Bool(true)
+	}
+
 	if task.isGPUEnabled() && task.shouldRequireNvidiaRuntime(container) {
 		if task.NvidiaRuntime == "" {
 			return nil, &apierrors.HostConfigError{Msg: "Runtime is not set for GPU containers"}
@@ -1509,8 +1514,23 @@ func (task *Task) dockerHostConfig(container *apicontainer.Container, dockerCont
 
 // Requires an *apicontainer.Container and returns the Resources for the HostConfig struct
 func (task *Task) getDockerResources(container *apicontainer.Container) dockercontainer.Resources {
+	// Allow treating Memory as a MemoryReservation if a DOCKER_MEMORY_LIMIT
+	// environment variable is set.
+	memory_mb     := container.Memory
+	memory_res_mb := memory_mb
+	if container.Environment != nil {
+		memory_limit_mb_str, prs := container.Environment["DOCKER_MEMORY_LIMIT"]
+		if prs {
+			memory_limit_mb, err := strconv.Atoi(memory_limit_mb_str)
+			if err == nil {
+				memory_mb = uint(memory_limit_mb)
+			}
+		}
+	}
+
 	// Convert MB to B and set Memory
-	dockerMem := int64(container.Memory * 1024 * 1024)
+	dockerMem := int64(memory_mb * 1024 * 1024)
+	dockerMemReservation := int64(memory_res_mb * 1024 * 1024)
 	if dockerMem != 0 && dockerMem < apicontainer.DockerContainerMinimumMemoryInBytes {
 		seelog.Warnf("Task %s container %s memory setting is too low, increasing to %d bytes",
 			task.Arn, container.Name, apicontainer.DockerContainerMinimumMemoryInBytes)
@@ -1522,6 +1542,11 @@ func (task *Task) getDockerResources(container *apicontainer.Container) dockerco
 		Memory:    dockerMem,
 		CPUShares: cpuShare,
 	}
+
+	if dockerMem != dockerMemReservation {
+		resources.MemoryReservation = dockerMemReservation
+	}
+
 	return resources
 }
 
