@@ -1,6 +1,6 @@
 // +build linux
 
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -17,6 +17,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 
 	asmfactory "github.com/aws/amazon-ecs-agent/agent/asm/factory"
 	"github.com/aws/amazon-ecs-agent/agent/config"
@@ -57,13 +58,15 @@ func (agent *ecsAgent) startWindowsService() int {
 	return 1
 }
 
+var getPid = os.Getpid
+
 // initializeTaskENIDependencies initializes all of the dependencies required by
 // the Agent to support the 'awsvpc' networking mode. A non nil error is returned
 // if an error is encountered during this process. An additional boolean flag to
 // indicate if this error is considered terminal is also returned
 func (agent *ecsAgent) initializeTaskENIDependencies(state dockerstate.TaskEngineState, taskEngine engine.TaskEngine) (error, bool) {
 	// Check if the Agent process's pid  == 1, which means it's running without an init system
-	if agent.os.Getpid() == initPID {
+	if getPid() == initPID {
 		// This is a terminal error. Bad things happen with invoking the
 		// the ENI plugin when there's no init process in the pid namespace.
 		// Specifically, the DHClient processes that are started as children
@@ -143,7 +146,7 @@ func (agent *ecsAgent) verifyCNIPluginsCapabilities() error {
 	// Check if we can get capabilities from each plugin
 	for _, plugin := range awsVPCCNIPlugins {
 		// skip verifying branch cni plugin if eni trunking is not enabled
-		if plugin == ecscni.ECSBranchENIPluginName && agent.cfg != nil && !agent.cfg.ENITrunkingEnabled {
+		if plugin == ecscni.ECSBranchENIPluginName && agent.cfg != nil && !agent.cfg.ENITrunkingEnabled.Enabled() {
 			continue
 		}
 
@@ -168,16 +171,20 @@ func (agent *ecsAgent) verifyCNIPluginsCapabilities() error {
 // notifications from the monitor
 func (agent *ecsAgent) startUdevWatcher(state dockerstate.TaskEngineState, stateChangeEvents chan<- statechange.Event) error {
 	seelog.Debug("Setting up ENI Watcher")
-	udevMonitor, err := udevwrapper.New()
-	if err != nil {
-		return errors.Wrapf(err, "unable to create udev monitor")
+	if agent.udevMonitor == nil {
+		monitor, err := udevwrapper.New()
+		if err != nil {
+			return errors.Wrapf(err, "unable to create udev monitor")
+		}
+		agent.udevMonitor = monitor
+
+		// Create Watcher
+		eniWatcher := watcher.New(agent.ctx, agent.mac, agent.udevMonitor, state, stateChangeEvents)
+		if err := eniWatcher.Init(); err != nil {
+			return errors.Wrapf(err, "unable to initialize eni watcher")
+		}
+		go eniWatcher.Start()
 	}
-	// Create Watcher
-	eniWatcher := watcher.New(agent.ctx, agent.mac, udevMonitor, state, stateChangeEvents)
-	if err := eniWatcher.Init(); err != nil {
-		return errors.Wrapf(err, "unable to initialize eni watcher")
-	}
-	go eniWatcher.Start()
 	return nil
 }
 
@@ -216,11 +223,11 @@ func (agent *ecsAgent) cgroupInit() error {
 	if err == nil {
 		return nil
 	}
-	if agent.cfg.TaskCPUMemLimit == config.ExplicitlyEnabled {
+	if agent.cfg.TaskCPUMemLimit.Value == config.ExplicitlyEnabled {
 		return errors.Wrapf(err, "unable to setup '/ecs' cgroup")
 	}
 	seelog.Warnf("Disabling TaskCPUMemLimit because agent is unabled to setup '/ecs' cgroup: %v", err)
-	agent.cfg.TaskCPUMemLimit = config.ExplicitlyDisabled
+	agent.cfg.TaskCPUMemLimit.Value = config.ExplicitlyDisabled
 	return nil
 }
 

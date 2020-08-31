@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -57,6 +57,11 @@ var (
 	// ErrResourceDependencyNotResolved is when the container's dependencies
 	// on task resources are not resolved
 	ErrResourceDependencyNotResolved = errors.New("dependency graph: dependency on resources not resolved")
+	// ResourcePastDesiredStatusErr is the error where the task resource known status is bigger than desired status
+	ResourcePastDesiredStatusErr = errors.New("task resource transition: task resource status is equal or greater than desired status")
+	// ErrContainerDependencyNotResolvedForResource is when the resource's dependencies
+	// on other containers are not resolved
+	ErrContainerDependencyNotResolvedForResource = errors.New("dependency graph: resource's dependency on containers not resolved")
 )
 
 // ValidDependencies takes a task and verifies that it is possible to allow all
@@ -158,13 +163,42 @@ func DependenciesAreResolved(target *apicontainer.Container,
 	return nil, nil
 }
 
-func linksToContainerNames(links []string) []string {
-	names := make([]string, 0, len(links))
-	for _, link := range links {
-		name := strings.Split(link, ":")[0]
-		names = append(names, name)
+// TaskResourceDependenciesAreResolved validates that the `target` resource can be
+// transitioned given the current known state of the containers in `by`. If
+// this function returns true, `target` should be technically able to transit
+// without issues.
+// Transitions are between known statuses (whether the resource can move to
+// the next known status), not desired statuses; the desired status typically
+// is either CREATED or REMOVED.
+func TaskResourceDependenciesAreResolved(target taskresource.TaskResource,
+	by []*apicontainer.Container) error {
+
+	nameMap := make(map[string]*apicontainer.Container)
+	for _, cont := range by {
+		nameMap[cont.Name] = cont
 	}
-	return names
+
+	if !verifyContainerDependenciesResolvedForResource(target, nameMap) {
+		return ErrContainerDependencyNotResolvedForResource
+	}
+
+	return nil
+}
+
+func verifyContainerDependenciesResolvedForResource(target taskresource.TaskResource, existingContainers map[string]*apicontainer.Container) bool {
+	targetNext := target.NextKnownState()
+	// For task resource without dependency map, containerDependencies will just be nil
+	containerDependencies := target.GetContainerDependencies(targetNext)
+	for _, containerDependency := range containerDependencies {
+		dep, exists := existingContainers[containerDependency.ContainerName]
+		if !exists {
+			return false
+		}
+		if dep.GetKnownStatus() < containerDependency.SatisfiedStatus {
+			return false
+		}
+	}
+	return true
 }
 
 func executionCredentialsResolved(target *apicontainer.Container, id string, manager credentials.Manager) bool {
@@ -234,12 +268,11 @@ func verifyContainerOrderingStatusResolvable(target *apicontainer.Container, exi
 			}
 		}
 
-		// We want to fail fast if the dependency container did not exit successfully' because target container
+		// We want to fail fast if the dependency container has stopped but did not exit successfully because target container
 		// can then never progress to its desired state when the dependency condition is 'SUCCESS'
-		if dependency.Condition == successCondition && dependencyContainer.GetKnownExitCode() != nil {
-			if !hasDependencyStoppedSuccessfully(dependencyContainer, dependency.Condition) {
-				return nil, fmt.Errorf("dependency graph: failed to resolve container ordering dependency [%v] for target [%v] as dependency did not exit successfully.", dependencyContainer, target)
-			}
+		if dependency.Condition == successCondition && dependencyContainer.GetKnownStatus() == apicontainerstatus.ContainerStopped &&
+			!hasDependencyStoppedSuccessfully(dependencyContainer) {
+			return nil, fmt.Errorf("dependency graph: failed to resolve container ordering dependency [%v] for target [%v] as dependency did not exit successfully.", dependencyContainer, target)
 		}
 
 		if !resolves(target, dependencyContainer, dependency.Condition) {
@@ -400,10 +433,9 @@ func hasDependencyTimedOut(dependOnContainer *apicontainer.Container, dependency
 	}
 }
 
-func hasDependencyStoppedSuccessfully(dependency *apicontainer.Container, condition string) bool {
-	isDependencyStoppedSuccessfully := dependency.GetKnownStatus() == apicontainerstatus.ContainerStopped &&
-		*dependency.GetKnownExitCode() == 0
-	return isDependencyStoppedSuccessfully
+func hasDependencyStoppedSuccessfully(dependency *apicontainer.Container) bool {
+	p := dependency.GetKnownExitCode()
+	return p != nil && *p == 0
 }
 
 func verifyContainerOrderingStatus(dependsOnContainer *apicontainer.Container) bool {

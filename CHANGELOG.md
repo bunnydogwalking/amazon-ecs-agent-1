@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.44.1
+* Bug - Fixes a bug where ENI is attached before Agent starts and there is a delay in acknowledgement of ENI attachment by Agent [#2581](https://github.com/aws/amazon-ecs-agent/pull/2581)
+* Bug - Fixes a deadlock scenario when the agent restores the state from its data file and the tasks are using environment files feature [#2580](https://github.com/aws/amazon-ecs-agent/pull/2580)
+* Bug - Fixed a bug that can cause stats endpoint to return empty response to container that just starts up [#2578](https://github.com/aws/amazon-ecs-agent/pull/2578)
+* Bug - Fixed a bug where parsing logic from env var parsing was introducing error depending on the value [#2573](https://github.com/aws/amazon-ecs-agent/pull/2573)
+
+## 1.44.0
+* Feature - Add support for customers to configure the destination for the Agent container logs, by setting a Docker-supported logging driver in the Agent config file - [#2548](https://github.com/aws/amazon-ecs-agent/pull/2548)
+* Enhancement - Agent's internal state management mechanism is changed from a custom json state file to boltdb. This change is made to reduce its resource consumption especially under high task density/mutation rate - [#2562](https://github.com/aws/amazon-ecs-agent/pull/2562)
+
+## 1.43.0
+* Feature - Collect network stats for awsvpc network mode and display network rate stats for bridge and awsvpc network mode through v4 metadata endpoint - [#2545](https://github.com/aws/amazon-ecs-agent/pull/2545)
+
+## 1.42.0
+* Feature - Support for sub second precision in FluentD [#2538](https://github.com/aws/amazon-ecs-agent/pull/2538).
+* Bug - Fixed a bug that caused configured values for ImageCleanupExclusionList
+to be ignored in some situations [#2513](https://github.com/aws/amazon-ecs-agent/pull/2513)
+
+## 1.41.1
+* Bug - Fixed a bug [#2476](https://github.com/aws/amazon-ecs-agent/issues/2476) where HostPort is not present in ECS Task Metadata Endpoint response with bridge network type [#2495](https://github.com/aws/amazon-ecs-agent/pull/2495)
+
+## 1.41.0
+* Feature - Add inferentia support [#2458](https://github.com/aws/amazon-ecs-agent/pull/2458)
+* Bug - fixes a bug where env file feature would not accept "=", which is the delimiter in the values of a env var [#2487](https://github.com/aws/amazon-ecs-agent/pull/2487)
+
+## 1.40.0
+* Enhancement - Agent's default stats gathering is changing from docker streaming stats to polling. This should not affect the metrics that customers ultimately see in cloudwatch, but it does affect how the agent gathers the underlying metrics from docker. This change was made for considerable performance gains. Customers with high CPU loads may see their cluster utilization increase; this is a good thing because it means the containers are utilizing more of the cluster, and agent/dockerd/containerd are utilizing less [#2452](https://github.com/aws/amazon-ecs-agent/pull/2452)
+* Enhancement - Adds a jitter to this so that we don't query docker for every container's state all at the same time [#2444](https://github.com/aws/amazon-ecs-agent/pull/2444)
+* Bug - Register custom logger before it gets used to ensure that the formatter is initiated before it is loaded [#2438](https://github.com/aws/amazon-ecs-agent/pull/2438)
+
+## 1.39.0
+* Feature - Add support for bulk loading env vars through environmentFiles field in task definition [#2420](https://github.com/aws/amazon-ecs-agent/pull/2420)
+* Feature - Add v4 task metadata endpoint, which includes additional network information compared to v3 [#2396](https://github.com/aws/amazon-ecs-agent/pull/2396)
+* Bug - Fixed an edge case that can cause task failed to start when using container ordering success condition [#2404](https://github.com/aws/amazon-ecs-agent/pull/2404).
+
+## 1.38.0
+* Feature - add integration with EFS's access point and IAM authorization features; support EFS volume for task in awsvpc network mode
+* Enhancement - adding Runtime ID of container to agent logs [#2399](https://github.com/aws/amazon-ecs-agent/pull/2399)
+
+## 1.37.0
+* Feature - additional parameters allowed when specifying secretsmanager secret [#2358](https://github.com/aws/amazon-ecs-agent/pull/2358)
+* Bug - fixed a bug where Firelens container could not use config file from S3 bucket in us-east-1 [#2356](https://github.com/aws/amazon-ecs-agent/pull/2356)
+
+## 1.36.2
+* Bug - fix windows logfile writing [#2347](https://github.com/aws/amazon-ecs-agent/pull/2347)
+* Bug - update sbin mount point to avoid conflict with Docker >= 19.03.5 [#2345](https://github.com/aws/amazon-ecs-agent/pull/2345)
+
 ## 1.36.1
 * Bug - Fixed potential file descriptor leak with context logger [#2337](https://github.com/aws/amazon-ecs-agent/pull/2337)
  

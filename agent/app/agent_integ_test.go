@@ -1,5 +1,5 @@
 // +build integration
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -15,7 +15,6 @@
 package app
 
 import (
-	"context"
 	"os"
 	"testing"
 
@@ -25,11 +24,10 @@ import (
 )
 
 func TestNewAgent(t *testing.T) {
-	ctx := context.TODO()
 	os.Setenv("AWS_DEFAULT_REGION", "us-west-2")
 	defer os.Unsetenv("AWS_DEFAULT_REGION")
 
-	agent, err := newAgent(ctx, true, aws.Bool(true))
+	agent, err := newAgent(true, aws.Bool(true))
 
 	assert.NoError(t, err)
 	// printECSAttributes should ensure that agent's cfg is set with

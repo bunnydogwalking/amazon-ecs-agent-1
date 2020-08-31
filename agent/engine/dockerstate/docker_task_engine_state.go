@@ -1,4 +1,4 @@
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -68,6 +68,8 @@ type TaskEngineState interface {
 	AddTaskIPAddress(addr string, taskARN string)
 	// GetTaskByIPAddress gets the task arn for an IP address
 	GetTaskByIPAddress(addr string) (string, bool)
+	// GetIPAddressByTaskARN gets the local ip address of a task.
+	GetIPAddressByTaskARN(taskARN string) (string, bool)
 	// DockerIDByV3EndpointID returns a docker ID for a given v3 endpoint ID
 	DockerIDByV3EndpointID(v3EndpointID string) (string, bool)
 	// TaskARNByV3EndpointID returns a taskARN for a given v3 endpoint ID
@@ -481,6 +483,19 @@ func (state *DockerTaskEngineState) GetTaskByIPAddress(addr string) (string, boo
 
 	taskARN, ok := state.ipToTask[addr]
 	return taskARN, ok
+}
+
+// GetIPAddressByTaskARN gets the local ip address of a task.
+func (state *DockerTaskEngineState) GetIPAddressByTaskARN(taskARN string) (string, bool) {
+	state.lock.RLock()
+	defer state.lock.RUnlock()
+
+	for addr, arn := range state.ipToTask {
+		if arn == taskARN {
+			return addr, true
+		}
+	}
+	return "", false
 }
 
 // storeV3EndpointIDToTaskUnsafe adds v3EndpointID -> taskARN mapping to state

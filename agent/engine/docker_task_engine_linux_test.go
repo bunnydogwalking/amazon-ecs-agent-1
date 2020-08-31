@@ -1,6 +1,6 @@
 // +build linux,unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -31,10 +31,10 @@ import (
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	mock_dockerstate "github.com/aws/amazon-ecs-agent/agent/engine/dockerstate/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/engine/testdata"
-	mock_statemanager "github.com/aws/amazon-ecs-agent/agent/statemanager/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/cgroup"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/cgroup/control/mock_control"
@@ -55,14 +55,13 @@ import (
 const (
 	cgroupMountPath = "/sys/fs/cgroup"
 
-	testTaskARN        = "arn:aws:ecs:region:account-id:task/task-id"
 	testTaskDefFamily  = "testFamily"
 	testTaskDefVersion = "1"
 )
 
 func init() {
 	defaultConfig = config.DefaultConfig()
-	defaultConfig.TaskCPUMemLimit = config.ExplicitlyDisabled
+	defaultConfig.TaskCPUMemLimit.Value = config.ExplicitlyDisabled
 }
 
 // TestResourceContainerProgression tests the container progression based on a
@@ -144,9 +143,13 @@ func TestDeleteTask(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
+
 	mockControl := mock_control.NewMockControl(ctrl)
 	cgroupResource := cgroup.NewCgroupResource("", mockControl, nil, "cgroupRoot", "", specs.LinuxResources{})
 	task := &apitask.Task{
+		Arn: testTaskARN,
 		ENIs: []*apieni.ENI{
 			{
 				MacAddress: mac,
@@ -155,25 +158,45 @@ func TestDeleteTask(t *testing.T) {
 	}
 	task.ResourcesMapUnsafe = make(map[string][]taskresource.TaskResource)
 	task.AddResource("cgroup", cgroupResource)
+	require.NoError(t, dataClient.SaveTask(task))
+
 	cfg := defaultConfig
-	cfg.TaskCPUMemLimit = config.ExplicitlyEnabled
+	cfg.TaskCPUMemLimit.Value = config.ExplicitlyEnabled
 	mockState := mock_dockerstate.NewMockTaskEngineState(ctrl)
-	mockSaver := mock_statemanager.NewMockStateManager(ctrl)
 
 	taskEngine := &DockerTaskEngine{
-		state: mockState,
-		saver: mockSaver,
-		cfg:   &cfg,
+		state:      mockState,
+		dataClient: dataClient,
+		cfg:        &cfg,
+	}
+
+	attachment := &apieni.ENIAttachment{
+		TaskARN:          "TaskARN",
+		AttachmentARN:    testAttachmentArn,
+		MACAddress:       "MACAddress",
+		Status:           apieni.ENIAttachmentNone,
+		AttachStatusSent: true,
 	}
 
 	gomock.InOrder(
 		mockControl.EXPECT().Remove("cgroupRoot").Return(nil),
 		mockState.EXPECT().RemoveTask(task),
+		mockState.EXPECT().ENIByMac(gomock.Any()).Return(attachment, true),
 		mockState.EXPECT().RemoveENIAttachment(mac),
-		mockSaver.EXPECT().Save(),
 	)
 
+	assert.NoError(t, taskEngine.dataClient.SaveENIAttachment(attachment))
+	attachments, err := taskEngine.dataClient.GetENIAttachments()
+	assert.NoError(t, err)
+	assert.Len(t, attachments, 1)
+
 	taskEngine.deleteTask(task)
+	tasks, err := dataClient.GetTasks()
+	require.NoError(t, err)
+	assert.Len(t, tasks, 0)
+	attachments, err = taskEngine.dataClient.GetENIAttachments()
+	assert.NoError(t, err)
+	assert.Len(t, attachments, 0)
 }
 
 func TestDeleteTaskBranchENIEnabled(t *testing.T) {
@@ -183,6 +206,7 @@ func TestDeleteTaskBranchENIEnabled(t *testing.T) {
 	mockControl := mock_control.NewMockControl(ctrl)
 	cgroupResource := cgroup.NewCgroupResource("", mockControl, nil, "cgroupRoot", "", specs.LinuxResources{})
 	task := &apitask.Task{
+		Arn: testTaskARN,
 		ENIs: []*apieni.ENI{
 			{
 				MacAddress:                   mac,
@@ -193,20 +217,18 @@ func TestDeleteTaskBranchENIEnabled(t *testing.T) {
 	task.ResourcesMapUnsafe = make(map[string][]taskresource.TaskResource)
 	task.AddResource("cgroup", cgroupResource)
 	cfg := defaultConfig
-	cfg.TaskCPUMemLimit = config.ExplicitlyEnabled
+	cfg.TaskCPUMemLimit.Value = config.ExplicitlyEnabled
 	mockState := mock_dockerstate.NewMockTaskEngineState(ctrl)
-	mockSaver := mock_statemanager.NewMockStateManager(ctrl)
 
 	taskEngine := &DockerTaskEngine{
-		state: mockState,
-		saver: mockSaver,
-		cfg:   &cfg,
+		state:      mockState,
+		cfg:        &cfg,
+		dataClient: data.NewNoopClient(),
 	}
 
 	gomock.InOrder(
 		mockControl.EXPECT().Remove("cgroupRoot").Return(nil),
 		mockState.EXPECT().RemoveTask(task),
-		mockSaver.EXPECT().Save(),
 	)
 
 	taskEngine.deleteTask(task)
@@ -257,14 +279,14 @@ func TestTaskCPULimitHappyPath(t *testing.T) {
 		metadataCreateError error
 		metadataUpdateError error
 		metadataCleanError  error
-		taskCPULimit        config.Conditional
+		taskCPULimit        config.BooleanDefaultTrue
 	}{
 		{
 			name:                "Task CPU Limit Succeeds",
 			metadataCreateError: nil,
 			metadataUpdateError: nil,
 			metadataCleanError:  nil,
-			taskCPULimit:        config.ExplicitlyEnabled,
+			taskCPULimit:        config.BooleanDefaultTrue{Value: config.ExplicitlyEnabled},
 		},
 	}
 
@@ -272,7 +294,7 @@ func TestTaskCPULimitHappyPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			metadataConfig := defaultConfig
 			metadataConfig.TaskCPUMemLimit = tc.taskCPULimit
-			metadataConfig.ContainerMetadataEnabled = true
+			metadataConfig.ContainerMetadataEnabled = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 			ctx, cancel := context.WithCancel(context.TODO())
 			defer cancel()
 			ctrl, client, mockTime, taskEngine, credentialsManager, imageManager, metadataManager := mocks(

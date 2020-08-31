@@ -1,6 +1,6 @@
 //+build integration
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -342,7 +342,7 @@ func TestStatsEngineWithNewContainers(t *testing.T) {
 
 func TestStatsEngineWithNewContainersWithPolling(t *testing.T) {
 	// additional config fields to use polling instead of stream
-	cfg.PollMetrics = true
+	cfg.PollMetrics = config.BooleanDefaultTrue{Value: config.ExplicitlyEnabled}
 	cfg.PollingMetricsWaitDuration = 1 * time.Second
 	// Create a new docker client with new config
 	dockerClientForNewContainersWithPolling, _ := dockerapi.NewDockerGoClient(sdkClientFactory, &cfg, ctx)
@@ -398,7 +398,7 @@ func TestStatsEngineWithNewContainersWithPolling(t *testing.T) {
 	assert.NoError(t, err, "failed to write to container change event stream")
 
 	// Wait for the stats collection go routine to start.
-	time.Sleep(10 * SleepBetweenUsageDataCollection)
+	time.Sleep(10 * time.Second)
 	validateInstanceMetrics(t, engine)
 	// Verify the health metrics of container
 	validateTaskHealthMetrics(t, engine)
@@ -422,7 +422,7 @@ func TestStatsEngineWithNewContainersWithPolling(t *testing.T) {
 	validateEmptyTaskHealthMetrics(t, engine)
 
 	// reset cfg, currently cfg is shared by all tests.
-	cfg.PollMetrics = false
+	cfg.PollMetrics = config.BooleanDefaultTrue{Value: config.ExplicitlyDisabled}
 	cfg.PollingMetricsWaitDuration = config.DefaultPollingMetricsWaitDuration
 }
 

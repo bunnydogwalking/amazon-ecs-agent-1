@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -345,11 +345,11 @@ func (mr *MockDockerClientMockRecorder) StartContainer(arg0, arg1, arg2 interfac
 }
 
 // Stats mocks base method
-func (m *MockDockerClient) Stats(arg0 context.Context, arg1 string, arg2 time.Duration) (<-chan *types.StatsJSON, error) {
+func (m *MockDockerClient) Stats(arg0 context.Context, arg1 string, arg2 time.Duration) (<-chan *types.StatsJSON, <-chan error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Stats", arg0, arg1, arg2)
 	ret0, _ := ret[0].(<-chan *types.StatsJSON)
-	ret1, _ := ret[1].(error)
+	ret1, _ := ret[1].(<-chan error)
 	return ret0, ret1
 }
 

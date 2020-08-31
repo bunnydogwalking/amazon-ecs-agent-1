@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -58,6 +58,14 @@ const (
 	// MetadataURIFormat defines the URI format for v3 metadata endpoint
 	MetadataURIFormat = "http://169.254.170.2/v3/%s"
 
+	// MetadataURIEnvVarNameV4 defines the name of the environment
+	// variable in containers' config, which can be used by the containers to access the
+	// v4 metadata endpoint
+	MetadataURIEnvVarNameV4 = "ECS_CONTAINER_METADATA_URI_V4"
+
+	// MetadataURIFormat defines the URI format for v4 metadata endpoint
+	MetadataURIFormatV4 = "http://169.254.170.2/v4/%s"
+
 	// SecretProviderSSM is to show secret provider being SSM
 	SecretProviderSSM = "ssm"
 
@@ -69,6 +77,9 @@ const (
 
 	// TargetLogDriver is to show secret target being "LOG_DRIVER", the default will be "CONTAINER"
 	SecretTargetLogDriver = "LOG_DRIVER"
+
+	// neuronVisibleDevicesEnvVar is the env which indicates that the container wants to use inferentia devices.
+	neuronVisibleDevicesEnvVar = "AWS_NEURON_VISIBLE_DEVICES"
 )
 
 // DockerConfig represents additional metadata about a container to run. It's
@@ -101,6 +112,9 @@ type Container struct {
 	Name string
 	// RuntimeID is the docker id of the container
 	RuntimeID string
+	// TaskARNUnsafe is the task ARN of the task that the container belongs to. Access should be
+	// protected by lock i.e. via GetTaskARN and SetTaskARN.
+	TaskARNUnsafe string `json:"taskARN"`
 	// DependsOnUnsafe is the field which specifies the ordering for container startup and shutdown.
 	DependsOnUnsafe []DependsOn `json:"dependsOn,omitempty"`
 	// V3EndpointID is a container identifier used to construct v3 metadata endpoint; it's unique among
@@ -138,6 +152,8 @@ type Container struct {
 	EntryPoint *[]string
 	// Environment is the environment variable set in the container
 	Environment map[string]string `json:"environment"`
+	// EnvironmentFiles is the list of environmentFile used to populate environment variables
+	EnvironmentFiles []EnvironmentFile `json:"environmentFiles"`
 	// Overrides contains the configuration to override of a container
 	Overrides ContainerOverrides `json:"overrides"`
 	// DockerConfig is the configuration used to create the container
@@ -271,6 +287,11 @@ type DockerContainer struct {
 	DockerName string // needed for linking
 
 	Container *Container
+}
+
+type EnvironmentFile struct {
+	Value string `json:"value"`
+	Type  string `json:"type"`
 }
 
 // MountPoint describes the in-container location of a Volume and references
@@ -482,11 +503,7 @@ func (c *Container) GetNextKnownStateProgression() apicontainerstatus.ContainerS
 // IsInternal returns true if the container type is `ContainerCNIPause`
 // or `ContainerNamespacePause`. It returns false otherwise
 func (c *Container) IsInternal() bool {
-	if c.Type == ContainerNormal {
-		return false
-	}
-
-	return true
+	return c.Type != ContainerNormal
 }
 
 // IsRunning returns true if the container's known status is either RUNNING
@@ -857,6 +874,20 @@ func (c *Container) InjectV3MetadataEndpoint() {
 		fmt.Sprintf(MetadataURIFormat, c.V3EndpointID)
 }
 
+// InjectV4MetadataEndpoint injects the v4 metadata endpoint as an environment variable for a container
+func (c *Container) InjectV4MetadataEndpoint() {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// don't assume that the environment variable map has been initialized by others
+	if c.Environment == nil {
+		c.Environment = make(map[string]string)
+	}
+
+	c.Environment[MetadataURIEnvVarNameV4] =
+		fmt.Sprintf(MetadataURIFormatV4, c.V3EndpointID)
+}
+
 // ShouldCreateWithSSMSecret returns true if this container needs to get secret
 // value from SSM Parameter Store
 func (c *Container) ShouldCreateWithSSMSecret() bool {
@@ -895,6 +926,19 @@ func (c *Container) ShouldCreateWithASMSecret() bool {
 	return false
 }
 
+// ShouldCreateWithEnvFiles returns true if this container needs to
+// retrieve environment variable files
+func (c *Container) ShouldCreateWithEnvFiles() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	if c.EnvironmentFiles == nil {
+		return false
+	}
+
+	return len(c.EnvironmentFiles) != 0
+}
+
 // MergeEnvironmentVariables appends additional envVarName:envVarValue pairs to
 // the the container's environment values structure
 func (c *Container) MergeEnvironmentVariables(envVars map[string]string) {
@@ -908,6 +952,33 @@ func (c *Container) MergeEnvironmentVariables(envVars map[string]string) {
 	for k, v := range envVars {
 		c.Environment[k] = v
 	}
+}
+
+// MergeEnvironmentVariablesFromEnvfiles appends environment variable pairs from
+// the retrieved envfiles to the container's environment values list
+// envvars from envfiles will have lower precedence than existing envvars
+func (c *Container) MergeEnvironmentVariablesFromEnvfiles(envVarsList []map[string]string) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// create map if does not exist
+	if c.Environment == nil {
+		c.Environment = make(map[string]string)
+	}
+
+	// envVarsList is a list of map, where each map is from an envfile
+	// iterate over this sequentially because the original order of the
+	// environment files give precedence to the environment variables
+	for _, envVars := range envVarsList {
+		for k, v := range envVars {
+			// existing environment variables have precedence over variables from envfile
+			// only set the env var if key does not already exist
+			if _, ok := c.Environment[k]; !ok {
+				c.Environment[k] = v
+			}
+		}
+	}
+	return nil
 }
 
 // HasSecret returns whether a container has secret based on a certain condition.
@@ -1042,4 +1113,37 @@ func (c *Container) GetFirelensConfig() *FirelensConfig {
 	defer c.lock.RUnlock()
 
 	return c.FirelensConfig
+}
+
+// GetEnvironmentFiles returns the container's environment files.
+func (c *Container) GetEnvironmentFiles() []EnvironmentFile {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.EnvironmentFiles
+}
+
+// RequireNeuronRuntime checks if the container needs to use the neuron runtime.
+func (c *Container) RequireNeuronRuntime() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	_, ok := c.Environment[neuronVisibleDevicesEnvVar]
+	return ok
+}
+
+// SetTaskARN sets the task arn of the container.
+func (c *Container) SetTaskARN(arn string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	c.TaskARNUnsafe = arn
+}
+
+// GetTaskARN returns the task arn of the container.
+func (c *Container) GetTaskARN() string {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.TaskARNUnsafe
 }

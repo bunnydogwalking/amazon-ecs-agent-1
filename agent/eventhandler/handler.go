@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -14,6 +14,7 @@
 package eventhandler
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
@@ -24,13 +25,20 @@ import (
 
 // HandleEngineEvents handles state change events from the state change event channel by sending it to
 // responsible event handler
-func HandleEngineEvents(taskEngine engine.TaskEngine, client api.ECSClient, taskHandler *TaskHandler,
+func HandleEngineEvents(
+	ctx context.Context,
+	taskEngine engine.TaskEngine,
+	client api.ECSClient,
+	taskHandler *TaskHandler,
 	attachmentEventHandler *AttachmentEventHandler) {
 	for {
 		stateChangeEvents := taskEngine.StateChangeEvents()
 
 		for stateChangeEvents != nil {
 			select {
+			case <-ctx.Done():
+				seelog.Infof("Exiting the engine event handler.")
+				return
 			case event, ok := <-stateChangeEvents:
 				if !ok {
 					stateChangeEvents = nil

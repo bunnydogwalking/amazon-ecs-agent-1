@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -25,13 +25,13 @@ import (
 
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/ec2"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/engine/image"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 
 	"github.com/docker/docker/api/types"
 	"github.com/golang/mock/gomock"
@@ -44,6 +44,23 @@ func defaultTestConfig() *config.Config {
 	return cfg
 }
 
+func TestNewImageManagerExcludesCachedImages(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.PauseContainerImageName = "pause-name"
+	cfg.PauseContainerTag = "pause-tag"
+	cfg.ImageCleanupExclusionList = []string{"excluded:1"}
+	expected := []string{
+		"excluded:1",
+		"pause-name:pause-tag",
+		config.DefaultPauseContainerImageName + ":" + config.DefaultPauseContainerTag,
+		config.CachedImageNameAgentContainer,
+	}
+	imageManager := NewImageManager(cfg, nil, nil)
+	dockerImageManager, ok := imageManager.(*dockerImageManager)
+	require.True(t, ok, "imageManager must be *dockerImageManager")
+	assert.ElementsMatch(t, expected, dockerImageManager.imageCleanupExclusionList)
+}
+
 // TestImagePullRemoveDeadlock tests if there's a deadlock when trying to
 // pull an image while image clean up is in progress
 func TestImagePullRemoveDeadlock(t *testing.T) {
@@ -53,7 +70,7 @@ func TestImagePullRemoveDeadlock(t *testing.T) {
 
 	cfg := defaultTestConfig()
 	imageManager := NewImageManager(cfg, client, dockerstate.NewTaskEngineState())
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	sleepContainer := &apicontainer.Container{
 		Name:  "sleep",
@@ -99,7 +116,7 @@ func TestAddAndRemoveContainerToImageStateReferenceHappyPath(t *testing.T) {
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 
 	imageManager := NewImageManager(defaultTestConfig(), client, dockerstate.NewTaskEngineState())
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Name:  "testContainer",
@@ -146,12 +163,13 @@ func TestRecordContainerReferenceInspectError(t *testing.T) {
 
 	imageManager := &dockerImageManager{
 		client:                   client,
+		dataClient:               data.NewNoopClient(),
 		state:                    dockerstate.NewTaskEngineState(),
 		minimumAgeBeforeDeletion: config.DefaultImageDeletionAge,
 		numImagesToDelete:        config.DefaultNumImagesToDeletePerCycle,
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Name:  "testContainer",
@@ -185,7 +203,7 @@ func TestRecordContainerReferenceWithNoImageName(t *testing.T) {
 		numImagesToDelete:        config.DefaultNumImagesToDeletePerCycle,
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Name:  "testContainer",
@@ -199,6 +217,7 @@ func TestRecordContainerReferenceWithNoImageName(t *testing.T) {
 		PulledAt: time.Now(),
 	}
 	imageManager.addImageState(sourceImageState)
+
 	imageInspected := &types.ImageInspect{
 		ID: "sha256:qwerty",
 	}
@@ -224,7 +243,7 @@ func TestAddInvalidContainerReferenceToImageState(t *testing.T) {
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 
 	imageManager := NewImageManager(defaultTestConfig(), client, dockerstate.NewTaskEngineState())
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Image: "",
@@ -240,6 +259,7 @@ func TestAddContainerReferenceToExistingImageState(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
+	imageManager.SetDataClient(data.NewNoopClient())
 	imageID := "sha256:qwerty"
 	container := &apicontainer.Container{
 		Name:    "testContainer",
@@ -392,6 +412,7 @@ func TestAddContainerReferenceToNewImageState(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
+	imageManager.SetDataClient(data.NewNoopClient())
 	imageID := "sha256:qwerty"
 	var imageSize int64
 	imageSize = 18767
@@ -412,6 +433,7 @@ func TestAddContainerReferenceToNewImageStateAddedState(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
+	imageManager.SetDataClient(data.NewNoopClient())
 	imageID := "sha256:qwerty"
 	var imageSize int64
 	imageSize = 18767
@@ -450,7 +472,7 @@ func TestRemoveContainerReferenceFromInvalidImageState(t *testing.T) {
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 
 	imageManager := NewImageManager(defaultTestConfig(), client, dockerstate.NewTaskEngineState())
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Image: "myContainerImage",
@@ -471,7 +493,7 @@ func TestRemoveInvalidContainerReferenceFromImageState(t *testing.T) {
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 
 	imageManager := NewImageManager(defaultTestConfig(), client, dockerstate.NewTaskEngineState())
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Image: "",
@@ -488,7 +510,7 @@ func TestRemoveContainerReferenceFromImageStateInspectError(t *testing.T) {
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 
 	imageManager := NewImageManager(defaultTestConfig(), client, dockerstate.NewTaskEngineState())
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Image: "myContainerImage",
@@ -512,7 +534,7 @@ func TestRemoveContainerReferenceFromImageStateWithNoReference(t *testing.T) {
 		numImagesToDelete:        config.DefaultNumImagesToDeletePerCycle,
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Name:  "testContainer",
@@ -568,6 +590,7 @@ func TestGetCandidateImagesForDeletionImageJustPulled(t *testing.T) {
 		numImagesToDelete:        config.DefaultNumImagesToDeletePerCycle,
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	sourceImage := &image.Image{}
 	sourceImageState := &image.ImageState{
@@ -593,7 +616,7 @@ func TestGetCandidateImagesForDeletionImageHasContainerReference(t *testing.T) {
 		numImagesToDelete:        config.DefaultNumImagesToDeletePerCycle,
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Name:  "testContainer",
@@ -634,7 +657,7 @@ func TestGetCandidateImagesForDeletionImageHasMoreContainerReferences(t *testing
 		numImagesToDelete:        config.DefaultNumImagesToDeletePerCycle,
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Name:  "testContainer",
@@ -871,7 +894,7 @@ func TestRemoveAlreadyExistingImageNameWithDifferentID(t *testing.T) {
 		numImagesToDelete:        config.DefaultNumImagesToDeletePerCycle,
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	container := &apicontainer.Container{
 		Name:  "testContainer",
@@ -923,7 +946,7 @@ func TestImageCleanupHappyPath(t *testing.T) {
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
 
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",
@@ -980,7 +1003,7 @@ func TestImageCleanupCannotRemoveImage(t *testing.T) {
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
 
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",
@@ -1038,7 +1061,7 @@ func TestImageCleanupRemoveImageById(t *testing.T) {
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
 
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",
@@ -1090,10 +1113,10 @@ func TestNonECSImageAndContainersCleanupRemoveImage(t *testing.T) {
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1146,10 +1169,10 @@ func TestNonECSImageAndContainersCleanupRemoveImage_OneImageThreeTags(t *testing
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1206,11 +1229,11 @@ func TestNonECSImageAndContainersCleanupRemoveImage_DontDeleteExcludedImage(t *t
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 		imageCleanupExclusionList:          []string{"tester"},
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1264,11 +1287,11 @@ func TestNonECSImageAndContainerCleanupRemoveImage_DontDeleteNotOldEnoughImage(t
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 		nonECSMinimumAgeBeforeDeletion:     time.Hour * 100,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1318,11 +1341,11 @@ func TestNonECSImageAndContainerCleanupRemoveImage_DeleteOldEnoughImage(t *testi
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 		nonECSMinimumAgeBeforeDeletion:     time.Hour * 3,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1373,15 +1396,15 @@ func TestNonECSImageAndContainersCleanupRemoveImage_DontDeleteECSImages(t *testi
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 	}
+	imageManager.SetDataClient(data.NewNoopClient())
 	imageState := &image.ImageState{
 		Image:    &image.Image{ImageID: "sha256:qwerty1"},
 		PulledAt: time.Now(),
 	}
 	imageManager.addImageState(imageState)
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1437,10 +1460,10 @@ func TestNonECSImageAndContainers_RemoveDeadContainer(t *testing.T) {
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1494,10 +1517,10 @@ func TestNonECSImageAndContainersCleanup_RemoveOldCreatedContainer(t *testing.T)
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1550,10 +1573,10 @@ func TestNonECSImageAndContainersCleanup_DontRemoveContainerWithInvalidFinishedT
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1607,10 +1630,10 @@ func TestNonECSImageAndContainersCleanup_DoNotRemoveNewlyCreatedContainer(t *tes
 		numImagesToDelete:                  config.DefaultNumImagesToDeletePerCycle,
 		numNonECSContainersToDelete:        10,
 		imageCleanupTimeInterval:           config.DefaultImageCleanupTimeInterval,
-		deleteNonECSImagesEnabled:          true,
+		deleteNonECSImagesEnabled:          config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		nonECSContainerCleanupWaitDuration: time.Hour * 3,
 	}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	listContainersResponse := dockerapi.ListContainersResponse{
 		DockerIDs: []string{"1"},
@@ -1657,7 +1680,7 @@ func TestDeleteImage(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",
@@ -1690,7 +1713,7 @@ func TestDeleteImageNotFoundOldDockerMessageError(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",
@@ -1722,7 +1745,7 @@ func TestDeleteImageNotFoundError(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",
@@ -1754,7 +1777,7 @@ func TestDeleteImageOtherRemoveImageErrors(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",
@@ -1786,7 +1809,7 @@ func TestDeleteImageIDNull(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	imageManager.deleteImage(ctx, "", nil)
@@ -1797,7 +1820,7 @@ func TestRemoveLeastRecentlyUsedImageNoImage(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	err := imageManager.removeLeastRecentlyUsedImage(ctx)
@@ -1811,7 +1834,7 @@ func TestRemoveUnusedImagesNoImages(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	imageManager.removeUnusedImages(ctx)
@@ -1822,7 +1845,7 @@ func TestGetImageStateFromImageName(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",
@@ -1846,7 +1869,7 @@ func TestGetImageStateFromImageNameNoImageState(t *testing.T) {
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	imageManager := &dockerImageManager{client: client, state: dockerstate.NewTaskEngineState()}
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",
@@ -1879,8 +1902,8 @@ func TestConcurrentRemoveUnusedImages(t *testing.T) {
 		numImagesToDelete:        config.DefaultNumImagesToDeletePerCycle,
 		imageCleanupTimeInterval: config.DefaultImageCleanupTimeInterval,
 	}
+	imageManager.SetDataClient(data.NewNoopClient())
 
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
 	container := &apicontainer.Container{
 		Name:  "testContainer",
 		Image: "testContainerImage",

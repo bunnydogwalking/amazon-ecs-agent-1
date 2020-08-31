@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -22,10 +22,10 @@ import (
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/statechange"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -41,11 +41,11 @@ import (
 const (
 	// checkPointSleep is the sleep duration in milliseconds between
 	// starting/stopping containers in the test code.
-	checkPointSleep              = 5 * SleepBetweenUsageDataCollection
+	checkPointSleep              = 5 * time.Second
 	testContainerHealthImageName = "amazon/amazon-ecs-containerhealthcheck:make"
 
 	// defaultDockerTimeoutSeconds is the timeout for dialing the docker remote API.
-	defaultDockerTimeoutSeconds = time.Second * 10
+	defaultDockerTimeoutSeconds = 10 * time.Second
 
 	// waitForCleanupSleep is the sleep duration in milliseconds
 	// for the waiting after container cleanup before checking the state of the manager.
@@ -66,6 +66,12 @@ var (
 func init() {
 	cfg.EngineAuthData = config.NewSensitiveRawMessage([]byte{})
 	cfg.ImagePullBehavior = config.ImagePullPreferCachedBehavior
+}
+
+// parseNanoTime returns the time object from a string formatted with RFC3339Nano layout.
+func parseNanoTime(value string) time.Time {
+	ts, _ := time.Parse(time.RFC3339Nano, value)
+	return ts
 }
 
 // eventStream returns the event stream used to receive container change events
@@ -293,7 +299,7 @@ func (engine *MockTaskEngine) StateChangeEvents() chan statechange.Event {
 	return make(chan statechange.Event)
 }
 
-func (engine *MockTaskEngine) SetSaver(statemanager.Saver) {
+func (engine *MockTaskEngine) SetDataClient(data.Client) {
 }
 
 func (engine *MockTaskEngine) AddTask(*apitask.Task) {
@@ -317,6 +323,14 @@ func (engine *MockTaskEngine) MarshalJSON() ([]byte, error) {
 
 func (engine *MockTaskEngine) Version() (string, error) {
 	return "", nil
+}
+
+func (engine *MockTaskEngine) LoadState() error {
+	return nil
+}
+
+func (engine *MockTaskEngine) SaveState() error {
+	return nil
 }
 
 func (engine *MockTaskEngine) Capabilities() []*ecs.Attribute {

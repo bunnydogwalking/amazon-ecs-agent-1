@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -32,6 +32,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	mock_engine "github.com/aws/amazon-ecs-agent/agent/engine/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
+	"github.com/aws/amazon-ecs-agent/agent/stats"
 	tcsclient "github.com/aws/amazon-ecs-agent/agent/tcs/client"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 	"github.com/aws/amazon-ecs-agent/agent/version"
@@ -67,8 +68,8 @@ func (*mockStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, []*ecstcs
 	return req.Metadata, req.TaskMetrics, nil
 }
 
-func (*mockStatsEngine) ContainerDockerStats(taskARN string, id string) (*types.StatsJSON, error) {
-	return nil, fmt.Errorf("not implemented")
+func (*mockStatsEngine) ContainerDockerStats(taskARN string, id string) (*types.StatsJSON, *stats.NetworkStatsPerSec, error) {
+	return nil, nil, fmt.Errorf("not implemented")
 }
 
 func (*mockStatsEngine) GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstcs.TaskHealth, error) {
@@ -80,8 +81,8 @@ func (*mockStatsEngine) GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstc
 func TestDisableMetrics(t *testing.T) {
 	params := TelemetrySessionParams{
 		Cfg: &config.Config{
-			DisableMetrics:           true,
-			DisableDockerHealthCheck: true,
+			DisableMetrics:           config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+			DisableDockerHealthCheck: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		},
 	}
 
@@ -133,7 +134,7 @@ func TestStartSession(t *testing.T) {
 
 	deregisterInstanceEventStream := eventstream.NewEventStream("Deregister_Instance", context.Background())
 	// Start a session with the test server.
-	go startSession(server.URL, testCfg, testCreds, &mockStatsEngine{},
+	go startSession(ctx, server.URL, testCfg, testCreds, &mockStatsEngine{},
 		defaultHeartbeatTimeout, defaultHeartbeatJitter,
 		testPublishMetricsInterval, deregisterInstanceEventStream)
 
@@ -197,7 +198,7 @@ func TestSessionConnectionClosedByRemote(t *testing.T) {
 	defer cancel()
 
 	// Start a session with the test server.
-	err = startSession(server.URL, testCfg, testCreds, &mockStatsEngine{},
+	err = startSession(ctx, server.URL, testCfg, testCreds, &mockStatsEngine{},
 		defaultHeartbeatTimeout, defaultHeartbeatJitter,
 		testPublishMetricsInterval, deregisterInstanceEventStream)
 
@@ -234,11 +235,11 @@ func TestConnectionInactiveTimeout(t *testing.T) {
 	deregisterInstanceEventStream.StartListening()
 	defer cancel()
 	// Start a session with the test server.
-	err = startSession(server.URL, testCfg, testCreds, &mockStatsEngine{},
+	err = startSession(ctx, server.URL, testCfg, testCreds, &mockStatsEngine{},
 		50*time.Millisecond, 100*time.Millisecond,
 		testPublishMetricsInterval, deregisterInstanceEventStream)
 	// if we are not blocked here, then the test pass as it will reconnect in StartSession
-	assert.Error(t, err, "Close the connection should cause the tcs client return error")
+	assert.NoError(t, err, "Close the connection should cause the tcs client return error")
 
 	assert.True(t, websocket.IsCloseError(<-serverErr, websocket.CloseAbnormalClosure),
 		"Read from closed connection should produce an io.EOF error")

@@ -1,5 +1,5 @@
 // +build integration
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -18,10 +18,10 @@
 package engine
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -29,9 +29,9 @@ import (
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/sdkclientfactory"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
@@ -55,6 +55,11 @@ const (
 //  e. Image has not passed the ‘hasNoAssociatedContainers’ criteria.
 //  f. Ensure that that if not eligible, image is not deleted from the instance and image reference in ImageManager is not removed.
 func TestIntegImageCleanupHappyCase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(`Skipping this test because of error: level=error time=2020-05-27T20:20:03Z msg="Error removing` +
+			` Image amazon/image-cleanup-test-image2:make - Error response from daemon: hcsshim::GetComputeSystems:` +
+			` The requested compute system operation is not valid in the current state." module=log.go`)
+	}
 	cfg := defaultTestConfigIntegTest()
 	cfg.TaskCleanupWaitDuration = 5 * time.Second
 
@@ -65,7 +70,7 @@ func TestIntegImageCleanupHappyCase(t *testing.T) {
 	taskEngine, done, _ := setup(cfg, nil, t)
 
 	imageManager := taskEngine.(*DockerTaskEngine).imageManager.(*dockerImageManager)
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	defer func() {
 		done()
@@ -172,7 +177,7 @@ func TestIntegImageCleanupThreshold(t *testing.T) {
 	taskEngine, done, _ := setup(cfg, nil, t)
 
 	imageManager := taskEngine.(*DockerTaskEngine).imageManager.(*dockerImageManager)
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	defer func() {
 		done()
@@ -290,7 +295,7 @@ func TestImageWithSameNameAndDifferentID(t *testing.T) {
 	require.NoError(t, err, "Creating SDK docker client failed")
 
 	imageManager := taskEngine.(*DockerTaskEngine).imageManager.(*dockerImageManager)
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	stateChangeEvents := taskEngine.StateChangeEvents()
 
@@ -430,7 +435,7 @@ func TestImageWithSameIDAndDifferentNames(t *testing.T) {
 	require.NoError(t, err, "Creating docker client failed")
 
 	imageManager := taskEngine.(*DockerTaskEngine).imageManager.(*dockerImageManager)
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 
 	stateChangeEvents := taskEngine.StateChangeEvents()
 
@@ -632,29 +637,29 @@ func verifyTaskIsCleanedUp(taskName string, taskEngine TaskEngine) error {
 }
 
 func verifyImagesAreRemoved(imageManager *dockerImageManager, imageIDs ...string) error {
-	imagesNotRemovedList := list.New()
+	imagesNotRemovedList := []string{}
 	for _, imageID := range imageIDs {
-		_, ok := imageManager.getImageState(imageID)
+		imageState, ok := imageManager.getImageState(imageID)
 		if ok {
-			imagesNotRemovedList.PushFront(imageID)
+			imagesNotRemovedList = append(imagesNotRemovedList, imageState.Image.String())
 		}
 	}
-	if imagesNotRemovedList.Len() > 0 {
-		return fmt.Errorf("Image states still exist for: %v", imagesNotRemovedList)
+	if len(imagesNotRemovedList) > 0 {
+		return fmt.Errorf("Image states still exist for: %s", imagesNotRemovedList)
 	}
 	return nil
 }
 
 func verifyImagesAreNotRemoved(imageManager *dockerImageManager, imageIDs ...string) error {
-	imagesRemovedList := list.New()
+	imagesRemovedList := []string{}
 	for _, imageID := range imageIDs {
-		_, ok := imageManager.getImageState(imageID)
+		imageState, ok := imageManager.getImageState(imageID)
 		if !ok {
-			imagesRemovedList.PushFront(imageID)
+			imagesRemovedList = append(imagesRemovedList, imageState.Image.String())
 		}
 	}
-	if imagesRemovedList.Len() > 0 {
-		return fmt.Errorf("Could not find images: %v in ImageManager", imagesRemovedList)
+	if len(imagesRemovedList) > 0 {
+		return fmt.Errorf("Could not find images: %s in ImageManager", imagesRemovedList)
 	}
 	return nil
 }

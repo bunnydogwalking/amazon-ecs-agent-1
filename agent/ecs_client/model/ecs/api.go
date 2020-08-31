@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -1610,10 +1610,12 @@ func (c *ECS) ListClustersPagesWithContext(ctx aws.Context, input *ListClustersI
 		},
 	}
 
-	cont := true
-	for p.Next() && cont {
-		cont = fn(p.Page().(*ListClustersOutput), !p.HasNextPage())
+	for p.Next() {
+		if !fn(p.Page().(*ListClustersOutput), !p.HasNextPage()) {
+			break
+		}
 	}
+
 	return p.Err()
 }
 
@@ -1759,10 +1761,12 @@ func (c *ECS) ListContainerInstancesPagesWithContext(ctx aws.Context, input *Lis
 		},
 	}
 
-	cont := true
-	for p.Next() && cont {
-		cont = fn(p.Page().(*ListContainerInstancesOutput), !p.HasNextPage())
+	for p.Next() {
+		if !fn(p.Page().(*ListContainerInstancesOutput), !p.HasNextPage()) {
+			break
+		}
 	}
+
 	return p.Err()
 }
 
@@ -1904,10 +1908,12 @@ func (c *ECS) ListServicesPagesWithContext(ctx aws.Context, input *ListServicesI
 		},
 	}
 
-	cont := true
-	for p.Next() && cont {
-		cont = fn(p.Page().(*ListServicesOutput), !p.HasNextPage())
+	for p.Next() {
+		if !fn(p.Page().(*ListServicesOutput), !p.HasNextPage()) {
+			break
+		}
 	}
+
 	return p.Err()
 }
 
@@ -2138,10 +2144,12 @@ func (c *ECS) ListTaskDefinitionFamiliesPagesWithContext(ctx aws.Context, input 
 		},
 	}
 
-	cont := true
-	for p.Next() && cont {
-		cont = fn(p.Page().(*ListTaskDefinitionFamiliesOutput), !p.HasNextPage())
+	for p.Next() {
+		if !fn(p.Page().(*ListTaskDefinitionFamiliesOutput), !p.HasNextPage()) {
+			break
+		}
 	}
+
 	return p.Err()
 }
 
@@ -2281,10 +2289,12 @@ func (c *ECS) ListTaskDefinitionsPagesWithContext(ctx aws.Context, input *ListTa
 		},
 	}
 
-	cont := true
-	for p.Next() && cont {
-		cont = fn(p.Page().(*ListTaskDefinitionsOutput), !p.HasNextPage())
+	for p.Next() {
+		if !fn(p.Page().(*ListTaskDefinitionsOutput), !p.HasNextPage()) {
+			break
+		}
 	}
+
 	return p.Err()
 }
 
@@ -2435,10 +2445,12 @@ func (c *ECS) ListTasksPagesWithContext(ctx aws.Context, input *ListTasksInput, 
 		},
 	}
 
-	cont := true
-	for p.Next() && cont {
-		cont = fn(p.Page().(*ListTasksOutput), !p.HasNextPage())
+	for p.Next() {
+		if !fn(p.Page().(*ListTasksOutput), !p.HasNextPage()) {
+			break
+		}
 	}
+
 	return p.Err()
 }
 
@@ -6981,12 +6993,47 @@ func (s *DockerVolumeConfiguration) SetScope(v string) *DockerVolumeConfiguratio
 	return s
 }
 
+type EFSAuthorizationConfig struct {
+	_ struct{} `type:"structure"`
+
+	AccessPointId *string `locationName:"accessPointId" type:"string"`
+
+	Iam *string `locationName:"iam" type:"string" enum:"EFSAuthorizationConfigIAM"`
+}
+
+// String returns the string representation
+func (s EFSAuthorizationConfig) String() string {
+	return awsutil.Prettify(s)
+}
+
+// GoString returns the string representation
+func (s EFSAuthorizationConfig) GoString() string {
+	return s.String()
+}
+
+// SetAccessPointId sets the AccessPointId field's value.
+func (s *EFSAuthorizationConfig) SetAccessPointId(v string) *EFSAuthorizationConfig {
+	s.AccessPointId = &v
+	return s
+}
+
+// SetIam sets the Iam field's value.
+func (s *EFSAuthorizationConfig) SetIam(v string) *EFSAuthorizationConfig {
+	s.Iam = &v
+	return s
+}
+
 type EFSVolumeConfiguration struct {
 	_ struct{} `type:"structure"`
 
-	FileSystemId *string `locationName:"fileSystemId" type:"string"`
+	AuthorizationConfig *EFSAuthorizationConfig `locationName:"authorizationConfig" type:"structure"`
+
+	// FileSystemId is a required field
+	FileSystemId *string `locationName:"fileSystemId" type:"string" required:"true"`
 
 	RootDirectory *string `locationName:"rootDirectory" type:"string"`
+
+	TransitEncryption *string `locationName:"transitEncryption" type:"string" enum:"EFSTransitEncryption"`
 }
 
 // String returns the string representation
@@ -6999,6 +7046,25 @@ func (s EFSVolumeConfiguration) GoString() string {
 	return s.String()
 }
 
+// Validate inspects the fields of the type to determine if they are valid.
+func (s *EFSVolumeConfiguration) Validate() error {
+	invalidParams := request.ErrInvalidParams{Context: "EFSVolumeConfiguration"}
+	if s.FileSystemId == nil {
+		invalidParams.Add(request.NewErrParamRequired("FileSystemId"))
+	}
+
+	if invalidParams.Len() > 0 {
+		return invalidParams
+	}
+	return nil
+}
+
+// SetAuthorizationConfig sets the AuthorizationConfig field's value.
+func (s *EFSVolumeConfiguration) SetAuthorizationConfig(v *EFSAuthorizationConfig) *EFSVolumeConfiguration {
+	s.AuthorizationConfig = v
+	return s
+}
+
 // SetFileSystemId sets the FileSystemId field's value.
 func (s *EFSVolumeConfiguration) SetFileSystemId(v string) *EFSVolumeConfiguration {
 	s.FileSystemId = &v
@@ -7008,6 +7074,12 @@ func (s *EFSVolumeConfiguration) SetFileSystemId(v string) *EFSVolumeConfigurati
 // SetRootDirectory sets the RootDirectory field's value.
 func (s *EFSVolumeConfiguration) SetRootDirectory(v string) *EFSVolumeConfiguration {
 	s.RootDirectory = &v
+	return s
+}
+
+// SetTransitEncryption sets the TransitEncryption field's value.
+func (s *EFSVolumeConfiguration) SetTransitEncryption(v string) *EFSVolumeConfiguration {
+	s.TransitEncryption = &v
 	return s
 }
 
@@ -9537,6 +9609,16 @@ func (s *RegisterTaskDefinitionInput) Validate() error {
 			}
 			if err := v.Validate(); err != nil {
 				invalidParams.AddNested(fmt.Sprintf("%s[%v]", "Tags", i), err.(request.ErrInvalidParams))
+			}
+		}
+	}
+	if s.Volumes != nil {
+		for i, v := range s.Volumes {
+			if v == nil {
+				continue
+			}
+			if err := v.Validate(); err != nil {
+				invalidParams.AddNested(fmt.Sprintf("%s[%v]", "Volumes", i), err.(request.ErrInvalidParams))
 			}
 		}
 	}
@@ -12341,6 +12423,21 @@ func (s Volume) GoString() string {
 	return s.String()
 }
 
+// Validate inspects the fields of the type to determine if they are valid.
+func (s *Volume) Validate() error {
+	invalidParams := request.ErrInvalidParams{Context: "Volume"}
+	if s.EfsVolumeConfiguration != nil {
+		if err := s.EfsVolumeConfiguration.Validate(); err != nil {
+			invalidParams.AddNested("EfsVolumeConfiguration", err.(request.ErrInvalidParams))
+		}
+	}
+
+	if invalidParams.Len() > 0 {
+		return invalidParams
+	}
+	return nil
+}
+
 // SetDockerVolumeConfiguration sets the DockerVolumeConfiguration field's value.
 func (s *Volume) SetDockerVolumeConfiguration(v *DockerVolumeConfiguration) *Volume {
 	s.DockerVolumeConfiguration = v
@@ -12492,6 +12589,22 @@ const (
 
 	// DeviceCgroupPermissionMknod is a DeviceCgroupPermission enum value
 	DeviceCgroupPermissionMknod = "mknod"
+)
+
+const (
+	// EFSAuthorizationConfigIAMEnabled is a EFSAuthorizationConfigIAM enum value
+	EFSAuthorizationConfigIAMEnabled = "ENABLED"
+
+	// EFSAuthorizationConfigIAMDisabled is a EFSAuthorizationConfigIAM enum value
+	EFSAuthorizationConfigIAMDisabled = "DISABLED"
+)
+
+const (
+	// EFSTransitEncryptionEnabled is a EFSTransitEncryption enum value
+	EFSTransitEncryptionEnabled = "ENABLED"
+
+	// EFSTransitEncryptionDisabled is a EFSTransitEncryption enum value
+	EFSTransitEncryptionDisabled = "DISABLED"
 )
 
 const (

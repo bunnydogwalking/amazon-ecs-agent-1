@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -288,6 +288,8 @@ type Container struct {
 
 	Environment map[string]*string `locationName:"environment" type:"map"`
 
+	EnvironmentFiles []*EnvironmentFile `locationName:"environmentFiles" type:"list"`
+
 	Essential *bool `locationName:"essential" type:"boolean"`
 
 	FirelensConfiguration *FirelensConfiguration `locationName:"firelensConfiguration" type:"structure"`
@@ -415,12 +417,36 @@ func (s ECRAuthData) GoString() string {
 	return s.String()
 }
 
+type EFSAuthorizationConfig struct {
+	_ struct{} `type:"structure"`
+
+	AccessPointId *string `locationName:"accessPointId" type:"string"`
+
+	Iam *string `locationName:"iam" type:"string" enum:"EFSAuthorizationConfigIAM"`
+}
+
+// String returns the string representation
+func (s EFSAuthorizationConfig) String() string {
+	return awsutil.Prettify(s)
+}
+
+// GoString returns the string representation
+func (s EFSAuthorizationConfig) GoString() string {
+	return s.String()
+}
+
 type EFSVolumeConfiguration struct {
 	_ struct{} `type:"structure"`
+
+	AuthorizationConfig *EFSAuthorizationConfig `locationName:"authorizationConfig" type:"structure"`
 
 	FileSystemId *string `locationName:"fileSystemId" type:"string"`
 
 	RootDirectory *string `locationName:"rootDirectory" type:"string"`
+
+	TransitEncryption *string `locationName:"transitEncryption" type:"string" enum:"EFSTransitEncryption"`
+
+	TransitEncryptionPort *int64 `locationName:"transitEncryptionPort" type:"integer"`
 }
 
 // String returns the string representation
@@ -484,6 +510,24 @@ func (s EncodedString) String() string {
 
 // GoString returns the string representation
 func (s EncodedString) GoString() string {
+	return s.String()
+}
+
+type EnvironmentFile struct {
+	_ struct{} `type:"structure"`
+
+	Type *string `locationName:"type" type:"string" enum:"EnvironmentFileType"`
+
+	Value *string `locationName:"value" type:"string"`
+}
+
+// String returns the string representation
+func (s EnvironmentFile) String() string {
+	return awsutil.Prettify(s)
+}
+
+// GoString returns the string representation
+func (s EnvironmentFile) GoString() string {
 	return s.String()
 }
 

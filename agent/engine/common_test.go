@@ -1,4 +1,4 @@
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,7 +49,15 @@ const (
 
 var (
 	defaultDockerClientAPIVersion = dockerclient.Version_1_17
+	// some unassigned ports to use for tests
+	// see https://www.speedguide.net/port.php?port=24685
+	unassignedPort int32 = 24685
 )
+
+// getUnassignedPort returns a NEW unassigned port each time it's called.
+func getUnassignedPort() uint16 {
+	return uint16(atomic.AddInt32(&unassignedPort, 1))
+}
 
 func discardEvents(from interface{}) func() {
 	done := make(chan bool)
@@ -161,6 +170,8 @@ func validateContainerRunWorkflow(t *testing.T,
 		container.SetV3EndpointID(v3EndpointID)
 		metadataEndpointEnvValue := fmt.Sprintf(apicontainer.MetadataURIFormat, v3EndpointID)
 		dockerConfig.Env = append(dockerConfig.Env, "ECS_CONTAINER_METADATA_URI="+metadataEndpointEnvValue)
+		metadataEndpointEnvValueV4 := fmt.Sprintf(apicontainer.MetadataURIFormatV4, v3EndpointID)
+		dockerConfig.Env = append(dockerConfig.Env, "ECS_CONTAINER_METADATA_URI_V4="+metadataEndpointEnvValueV4)
 	}
 	// Container config should get updated with this during CreateContainer
 	dockerConfig.Labels["com.amazonaws.ecs.task-arn"] = task.Arn

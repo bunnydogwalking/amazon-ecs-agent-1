@@ -1,6 +1,6 @@
 // +build windows
 
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/s3"
@@ -39,6 +41,18 @@ import (
 	"github.com/pkg/errors"
 )
 
+const (
+	tempFileName = "temp_file"
+	// filePerm is the permission for the credentialspec file.
+	filePerm = 0644
+
+	s3DownloadTimeout = 30 * time.Second
+
+	// Environment variables to setup resource location
+	envProgramData              = "ProgramData"
+	dockerCredentialSpecDataDir = "docker/credentialspecs"
+)
+
 // CredentialSpecResource is the abstraction for credentialspec resources
 type CredentialSpecResource struct {
 	taskARN                string
@@ -46,7 +60,6 @@ type CredentialSpecResource struct {
 	executionCredentialsID string
 	credentialsManager     credentials.Manager
 	ioutil                 ioutilwrapper.IOUtil
-	os                     oswrapper.OS
 	createdAt              time.Time
 	desiredStatusUnsafe    resourcestatus.ResourceStatus
 	knownStatusUnsafe      resourcestatus.ResourceStatus
@@ -98,7 +111,6 @@ func NewCredentialSpecResource(taskARN, region string,
 		ssmClientCreator:        ssmClientCreator,
 		s3ClientCreator:         s3ClientCreator,
 		CredSpecMap:             make(map[string]string),
-		os:                      oswrapper.NewOS(),
 		ioutil:                  ioutilwrapper.NewIOUtil(),
 	}
 
@@ -461,6 +473,8 @@ func (cs *CredentialSpecResource) handleSSMCredentialspecFile(originalCredential
 	return nil
 }
 
+var rename = os.Rename
+
 func (cs *CredentialSpecResource) writeS3File(writeFunc func(file oswrapper.File) error, filePath string) error {
 	temp, err := cs.ioutil.TempFile(cs.credentialSpecResourceLocation, tempFileName)
 	if err != nil {
@@ -478,7 +492,7 @@ func (cs *CredentialSpecResource) writeS3File(writeFunc func(file oswrapper.File
 		return err
 	}
 
-	err = cs.os.Rename(temp.Name(), filePath)
+	err = rename(temp.Name(), filePath)
 	if err != nil {
 		seelog.Errorf("Error while renaming the temporary file %s: %v", temp.Name(), err)
 		return err
@@ -523,6 +537,8 @@ func (cs *CredentialSpecResource) Cleanup() error {
 	return nil
 }
 
+var remove = os.Remove
+
 // clearCredentialSpec cycles through the collection of credentialspec data and
 // removes them from the task
 func (cs *CredentialSpecResource) clearCredentialSpec() {
@@ -542,7 +558,7 @@ func (cs *CredentialSpecResource) clearCredentialSpec() {
 		}
 		localCredentialSpecFile := credSpecSplit[1]
 		localCredentialSpecFilePath := filepath.Join(cs.credentialSpecResourceLocation, localCredentialSpecFile)
-		err := cs.os.Remove(localCredentialSpecFilePath)
+		err := remove(localCredentialSpecFilePath)
 		if err != nil {
 			seelog.Warnf("Unable to clear local credential spec file %s for task %s", localCredentialSpecFile, cs.taskARN)
 		}
@@ -628,5 +644,22 @@ func (cs *CredentialSpecResource) setCredentialSpecResourceLocation() error {
 		return errors.New("credentialspec resource location not available")
 	}
 
+	return nil
+}
+
+// GetAppliedStatus safely returns the currently applied status of the resource
+func (cs *CredentialSpecResource) GetAppliedStatus() resourcestatus.ResourceStatus {
+	return resourcestatus.ResourceStatusNone
+}
+
+func (cs *CredentialSpecResource) DependOnTaskNetwork() bool {
+	return false
+}
+
+func (cs *CredentialSpecResource) BuildContainerDependency(containerName string, satisfied apicontainerstatus.ContainerStatus,
+	dependent resourcestatus.ResourceStatus) {
+}
+
+func (cs *CredentialSpecResource) GetContainerDependencies(dependent resourcestatus.ResourceStatus) []apicontainer.ContainerDependency {
 	return nil
 }

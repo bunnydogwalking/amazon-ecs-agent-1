@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,15 +16,12 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
-	mock_pause "github.com/aws/amazon-ecs-agent/agent/eni/pause/mocks"
-
 	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
-
-	"context"
 
 	app_mocks "github.com/aws/amazon-ecs-agent/agent/app/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/config"
@@ -32,7 +29,9 @@ import (
 	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	mock_ecscni "github.com/aws/amazon-ecs-agent/agent/ecscni/mocks"
+	mock_pause "github.com/aws/amazon-ecs-agent/agent/eni/pause/mocks"
 	mock_mobypkgwrapper "github.com/aws/amazon-ecs-agent/agent/utils/mobypkgwrapper/mocks"
+
 	"github.com/aws/aws-sdk-go/aws"
 	aws_credentials "github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/golang/mock/gomock"
@@ -57,11 +56,11 @@ func TestCapabilities(t *testing.T) {
 			dockerclient.GelfDriver,
 			dockerclient.FluentdDriver,
 		},
-		PrivilegedDisabled:         false,
-		SELinuxCapable:             true,
-		AppArmorCapable:            true,
-		TaskENIEnabled:             true,
-		AWSVPCBlockInstanceMetdata: true,
+		PrivilegedDisabled:         config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
+		SELinuxCapable:             config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		AppArmorCapable:            config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		TaskENIEnabled:             config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		AWSVPCBlockInstanceMetdata: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		TaskCleanupWaitDuration:    config.DefaultConfig().TaskCleanupWaitDuration,
 	}
 
@@ -85,15 +84,26 @@ func TestCapabilities(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.privileged-container",
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
-		"com.amazonaws.ecs.capability.docker-remote-api.1.18",
-		"com.amazonaws.ecs.capability.logging-driver.json-file",
-		"com.amazonaws.ecs.capability.logging-driver.syslog",
-		"com.amazonaws.ecs.capability.logging-driver.journald",
-		"com.amazonaws.ecs.capability.selinux",
-		"com.amazonaws.ecs.capability.apparmor",
+		capabilityPrefix + "privileged-container",
+		capabilityPrefix + "docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.18",
+		capabilityPrefix + "logging-driver.json-file",
+		capabilityPrefix + "logging-driver.syslog",
+		capabilityPrefix + "logging-driver.journald",
+		capabilityPrefix + "selinux",
+		capabilityPrefix + "apparmor",
+		attributePrefix + "docker-plugin.local",
 		attributePrefix + taskENIAttributeSuffix,
+		attributePrefix + capabilityPrivateRegistryAuthASM,
+		attributePrefix + capabilitySecretEnvSSM,
+		attributePrefix + capabilitySecretLogDriverSSM,
+		attributePrefix + capabilityECREndpoint,
+		attributePrefix + capabilitySecretEnvASM,
+		attributePrefix + capabilitySecretLogDriverASM,
+		attributePrefix + capabilityContainerOrdering,
+		attributePrefix + capabilityFullTaskSync,
+		attributePrefix + capabilityEnvFilesS3,
+		attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -106,36 +116,6 @@ func TestCapabilities(t *testing.T) {
 			{
 				Name:  aws.String(attributePrefix + cniPluginVersionSuffix),
 				Value: aws.String("v1"),
-			},
-			{
-				Name: aws.String(attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix),
-			},
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityPrivateRegistryAuthASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityECREndpoint),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityContainerOrdering),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityFullTaskSync),
 			},
 		}...)
 
@@ -154,9 +134,11 @@ func TestCapabilities(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
 }
 
@@ -208,7 +190,7 @@ func TestCapabilitiesTaskIAMRoleForSupportedDockerVersion(t *testing.T) {
 	defer ctrl.Finish()
 
 	conf := &config.Config{
-		TaskIAMRoleEnabled: true,
+		TaskIAMRoleEnabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
 
@@ -252,7 +234,7 @@ func TestCapabilitiesTaskIAMRoleForUnSupportedDockerVersion(t *testing.T) {
 
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	conf := &config.Config{
-		TaskIAMRoleEnabled: true,
+		TaskIAMRoleEnabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
 
@@ -390,8 +372,8 @@ func TestAWSVPCBlockInstanceMetadataWhenTaskENIIsDisabled(t *testing.T) {
 		AvailableLoggingDrivers: []dockerclient.LoggingDriver{
 			dockerclient.JSONFileDriver,
 		},
-		TaskENIEnabled:             false,
-		AWSVPCBlockInstanceMetdata: true,
+		TaskENIEnabled:             config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
+		AWSVPCBlockInstanceMetdata: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
 
@@ -412,10 +394,10 @@ func TestAWSVPCBlockInstanceMetadataWhenTaskENIIsDisabled(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.privileged-container",
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
-		"com.amazonaws.ecs.capability.docker-remote-api.1.18",
-		"com.amazonaws.ecs.capability.logging-driver.json-file",
+		capabilityPrefix + "privileged-container",
+		capabilityPrefix + "docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.18",
+		capabilityPrefix + "logging-driver.json-file",
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -439,9 +421,11 @@ func TestAWSVPCBlockInstanceMetadataWhenTaskENIIsDisabled(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
 
 	for _, capability := range capabilities {
@@ -458,8 +442,8 @@ func TestCapabilitiesExecutionRoleAWSLogs(t *testing.T) {
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	cniClient := mock_ecscni.NewMockCNIClient(ctrl)
 	conf := &config.Config{
-		OverrideAWSLogsExecutionRole: true,
-		TaskENIEnabled:               true,
+		OverrideAWSLogsExecutionRole: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		TaskENIEnabled:               config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 	mockMobyPlugins := mock_mobypkgwrapper.NewMockPlugins(ctrl)
 
@@ -502,7 +486,7 @@ func TestCapabilitiesExecutionRoleAWSLogs(t *testing.T) {
 func TestCapabilitiesTaskResourceLimit(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
-	conf := &config.Config{TaskCPUMemLimit: config.ExplicitlyEnabled}
+	conf := &config.Config{TaskCPUMemLimit: config.BooleanDefaultTrue{Value: config.ExplicitlyEnabled}}
 
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	versionList := []dockerclient.DockerVersion{dockerclient.Version_1_22}
@@ -545,7 +529,7 @@ func TestCapabilitiesTaskResourceLimit(t *testing.T) {
 func TestCapabilitesTaskResourceLimitDisabledByMissingDockerVersion(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
-	conf := &config.Config{TaskCPUMemLimit: config.DefaultEnabled}
+	conf := &config.Config{TaskCPUMemLimit: config.BooleanDefaultTrue{Value: config.NotSet}}
 
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	versionList := []dockerclient.DockerVersion{dockerclient.Version_1_19}
@@ -588,7 +572,7 @@ func TestCapabilitesTaskResourceLimitDisabledByMissingDockerVersion(t *testing.T
 func TestCapabilitesTaskResourceLimitErrorCase(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
-	conf := &config.Config{TaskCPUMemLimit: config.ExplicitlyEnabled}
+	conf := &config.Config{TaskCPUMemLimit: config.BooleanDefaultTrue{Value: config.ExplicitlyEnabled}}
 
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
 	versionList := []dockerclient.DockerVersion{dockerclient.Version_1_19}
@@ -677,7 +661,7 @@ func TestCapabilitiesContainerHealthDisabled(t *testing.T) {
 	defer cancel()
 	agent := &ecsAgent{
 		ctx:          ctx,
-		cfg:          &config.Config{DisableDockerHealthCheck: true},
+		cfg:          &config.Config{DisableDockerHealthCheck: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}},
 		dockerClient: client,
 		pauseLoader:  mockPauseLoader,
 		mobyPlugins:  mockMobyPlugins,

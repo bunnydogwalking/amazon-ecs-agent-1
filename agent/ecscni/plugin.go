@@ -1,4 +1,4 @@
-// Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -35,7 +35,7 @@ const (
 	// ECSCNIVersion, ECSCNIGitHash, VPCCNIGitHash needs to be updated every time CNI plugin is updated
 	currentECSCNIVersion      = "2019.10.0"
 	currentECSCNIGitHash      = "9066095fbab8ca7b659ab2b95a1590e7aee55545"
-	currentVPCCNIGitHash      = "82e36ad32dbb94e3cc3de64c481f086417708944"
+	currentVPCCNIGitHash      = "42629fd69ede0bfa00c4698faa5ba9f4defbbbdb"
 	vpcCNIPluginPath          = "/log/vpc-branch-eni.log"
 	vpcCNIPluginInterfaceType = "vlan"
 )
@@ -90,11 +90,6 @@ func (client *cniClient) SetupNS(
 	timeout time.Duration) (*current.Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	type output struct {
-		result *current.Result
-		err    error
-	}
 	return client.setupNS(ctx, cfg)
 }
 
@@ -104,7 +99,7 @@ func (client *cniClient) setupNS(ctx context.Context, cfg *Config) (*current.Res
 	var bridgeResult cnitypes.Result
 	runtimeConfig := libcni.RuntimeConf{
 		ContainerID: cfg.ContainerID,
-		NetNS:       fmt.Sprintf(netnsFormat, cfg.ContainerPID),
+		NetNS:       fmt.Sprintf(NetnsFormat, cfg.ContainerPID),
 	}
 
 	// Execute all CNI network configurations serially, in the given order.
@@ -167,7 +162,7 @@ func (client *cniClient) cleanupNS(ctx context.Context, cfg *Config) error {
 
 	runtimeConfig := libcni.RuntimeConf{
 		ContainerID: cfg.ContainerID,
-		NetNS:       fmt.Sprintf(netnsFormat, cfg.ContainerPID),
+		NetNS:       fmt.Sprintf(NetnsFormat, cfg.ContainerPID),
 	}
 
 	// Execute all CNI network configurations serially, in the reverse order.
@@ -202,7 +197,7 @@ func (client *cniClient) ReleaseIPResource(ctx context.Context, cfg *Config, tim
 
 	runtimeConfig := libcni.RuntimeConf{
 		ContainerID: cfg.ContainerID,
-		NetNS:       fmt.Sprintf(netnsFormat, cfg.ContainerPID),
+		NetNS:       fmt.Sprintf(NetnsFormat, cfg.ContainerPID),
 	}
 
 	seelog.Debugf("[ECSCNI] Releasing the ip resource from ipam db, id: [%s], ip: [%v]", cfg.ID, cfg.IPAMV4Address)

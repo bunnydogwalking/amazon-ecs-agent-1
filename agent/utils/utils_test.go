@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,6 +16,7 @@
 package utils
 
 import (
+	"encoding/json"
 	"errors"
 	"sort"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDefaultIfBlank(t *testing.T) {
@@ -36,10 +38,19 @@ func TestDefaultIfBlank(t *testing.T) {
 	assert.Equal(t, defaultValue, result)
 }
 
+type dummyStruct struct {
+	// no contents
+}
+
+func (d dummyStruct) MarshalJSON([]byte, error) {
+	json.Marshal(nil)
+}
+
 func TestZeroOrNil(t *testing.T) {
 	type ZeroTest struct {
-		testInt int
-		TestStr string
+		testInt     int
+		TestStr     string
+		testNilJson dummyStruct
 	}
 
 	var strMap map[string]string
@@ -54,6 +65,7 @@ func TestZeroOrNil(t *testing.T) {
 		{"", true, "\"\" is the string zerovalue"},
 		{ZeroTest{}, true, "ZeroTest zero-value should be zero"},
 		{ZeroTest{TestStr: "asdf"}, false, "ZeroTest with a field populated isn't zero"},
+		{ZeroTest{testNilJson: dummyStruct{}}, true, "nil is nil"},
 		{1, false, "1 is not 0"},
 		{[]uint16{1, 2, 3}, false, "[1,2,3] is not zero"},
 		{[]uint16{}, true, "[] is zero"},
@@ -69,6 +81,7 @@ func TestZeroOrNil(t *testing.T) {
 			assert.Equal(t, tc.expected, ZeroOrNil(tc.param), tc.name)
 		})
 	}
+
 }
 
 func TestSlicesDeepEqual(t *testing.T) {
@@ -172,4 +185,24 @@ func TestMapToTags(t *testing.T) {
 
 func TestNilMapToTags(t *testing.T) {
 	assert.Zero(t, len(MapToTags(nil)))
+}
+
+func TestGetTaskID(t *testing.T) {
+	taskARN := "arn:aws:ecs:us-west-2:1234567890:task/test-cluster/abc"
+	id, err := GetTaskID(taskARN)
+	require.NoError(t, err)
+	assert.Equal(t, "abc", id)
+
+	_, err = GetTaskID("invalid")
+	assert.Error(t, err)
+}
+
+func TestGetENIAttachmentId(t *testing.T) {
+	attachmentArn := "arn:aws:ecs:us-west-2:1234567890:attachment/abc"
+	id, err := GetENIAttachmentId(attachmentArn)
+	require.NoError(t, err)
+	assert.Equal(t, "abc", id)
+
+	_, err = GetENIAttachmentId("invalid")
+	assert.Error(t, err)
 }

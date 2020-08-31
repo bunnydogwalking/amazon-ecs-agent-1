@@ -1,4 +1,4 @@
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -26,18 +26,18 @@ import (
 
 const (
 	// BytesInMiB is the number of bytes in a MebiByte.
-	BytesInMiB = 1024 * 1024
+	BytesInMiB              = 1024 * 1024
+	MaxCPUUsagePerc float32 = 1024 * 1024
+	NanoSecToSec    float32 = 1000000000
 )
-
-const minimumQueueDatapoints = 2
 
 // Queue abstracts a queue using UsageStats slice.
 type Queue struct {
-	buffer        []UsageStats
-	maxSize       int
-	lastResetTime time.Time
-	lastStat      *types.StatsJSON
-	lock          sync.RWMutex
+	buffer                []UsageStats
+	maxSize               int
+	lastStat              *types.StatsJSON
+	lastNetworkStatPerSec *NetworkStatsPerSec
+	lock                  sync.RWMutex
 }
 
 // NewQueue creates a queue.
@@ -48,12 +48,15 @@ func NewQueue(maxSize int) *Queue {
 	}
 }
 
-// Reset resets the stats queue.
+// Reset resets the queue's buffer so that only new metrics added after
+// this point will be sent to the backend when calling stat getter functions like
+// GetCPUStatsSet, GetMemoryStatSet, etc.
 func (queue *Queue) Reset() {
 	queue.lock.Lock()
 	defer queue.lock.Unlock()
-	queue.lastResetTime = time.Now()
-	queue.buffer = queue.buffer[:0]
+	for i := range queue.buffer {
+		queue.buffer[i].sent = true
+	}
 }
 
 // Add adds a new set of container stats to the queue.
@@ -87,23 +90,50 @@ func (queue *Queue) add(rawStat *ContainerStats) {
 		NetworkStats:      rawStat.networkStats,
 		Timestamp:         rawStat.timestamp,
 		cpuUsage:          rawStat.cpuUsage,
+		sent:              false,
 	}
 	if queueLength != 0 {
 		// % utilization can be calculated only when queue is non-empty.
 		lastStat := queue.buffer[queueLength-1]
 		timeSinceLastStat := float32(rawStat.timestamp.Sub(lastStat.Timestamp).Nanoseconds())
-		if timeSinceLastStat > 0 {
+		if timeSinceLastStat <= 0 {
+			// if we got a duplicate timestamp, set cpu percentage to the same value as the previous stat
+			seelog.Errorf("Received a docker stat object with duplicate timestamp")
+			stat.CPUUsagePerc = lastStat.CPUUsagePerc
+			if stat.NetworkStats != nil {
+				stat.NetworkStats.RxBytesPerSecond = lastStat.NetworkStats.RxBytesPerSecond
+				stat.NetworkStats.TxBytesPerSecond = lastStat.NetworkStats.TxBytesPerSecond
+			}
+		} else {
 			cpuUsageSinceLastStat := float32(rawStat.cpuUsage - lastStat.cpuUsage)
 			stat.CPUUsagePerc = 100 * cpuUsageSinceLastStat / timeSinceLastStat
-		} else {
-			// Ignore the stat if the current timestamp is same as the last one. This
-			// results in the value being set as +infinity
-			// float32(1) / float32(0) = +Inf
-			seelog.Debugf("time since last stat is zero. Ignoring cpu stat")
+
+			//calculate per second Network metrics
+			if stat.NetworkStats != nil {
+				rxBytesSinceLastStat := float32(stat.NetworkStats.RxBytes - lastStat.NetworkStats.RxBytes)
+				txBytesSinceLastStat := float32(stat.NetworkStats.TxBytes - lastStat.NetworkStats.TxBytes)
+				stat.NetworkStats.RxBytesPerSecond = NanoSecToSec * (rxBytesSinceLastStat / timeSinceLastStat)
+				stat.NetworkStats.TxBytesPerSecond = NanoSecToSec * (txBytesSinceLastStat / timeSinceLastStat)
+			}
 		}
-		if queue.maxSize == queueLength {
+
+		if queueLength >= queue.maxSize {
 			// Remove first element if queue is full.
 			queue.buffer = queue.buffer[1:queueLength]
+		}
+
+		if stat.CPUUsagePerc > MaxCPUUsagePerc {
+			// what in the world happened
+			seelog.Errorf("Calculated CPU usage percent (%.1f) is larger than backend maximum (%.1f). lastStatTS=%s lastStatCPUTime=%d thisStatTS=%s thisStatCPUTime=%d queueLength=%d",
+				stat.CPUUsagePerc, MaxCPUUsagePerc, lastStat.Timestamp.Format(time.RFC3339Nano), lastStat.cpuUsage, rawStat.timestamp.Format(time.RFC3339Nano), rawStat.cpuUsage, queueLength)
+		}
+
+		if stat.NetworkStats != nil {
+			networkStatPerSec := &NetworkStatsPerSec{
+				RxBytesPerSecond: stat.NetworkStats.RxBytesPerSecond,
+				TxBytesPerSecond: stat.NetworkStats.TxBytesPerSecond,
+			}
+			queue.lastNetworkStatPerSec = networkStatPerSec
 		}
 	}
 
@@ -116,6 +146,13 @@ func (queue *Queue) GetLastStat() *types.StatsJSON {
 	defer queue.lock.RUnlock()
 
 	return queue.lastStat
+}
+
+func (queue *Queue) GetLastNetworkStatPerSec() *NetworkStatsPerSec {
+	queue.lock.RLock()
+	defer queue.lock.RUnlock()
+
+	return queue.lastNetworkStatPerSec
 }
 
 // GetCPUStatsSet gets the stats set for CPU utilization.
@@ -179,6 +216,14 @@ func (queue *Queue) GetNetworkStatsSet() (*ecstcs.NetworkStatsSet, error) {
 	if err != nil {
 		seelog.Warnf("Error getting network tx packets: %v", err)
 	}
+	networkStatsSet.RxBytesPerSecond, err = queue.getUDoubleCWStatsSet(getNetworkRxPacketsPerSecond)
+	if err != nil {
+		seelog.Warnf("Error getting network rx bytes per second: %v", err)
+	}
+	networkStatsSet.TxBytesPerSecond, err = queue.getUDoubleCWStatsSet(getNetworkTxPacketsPerSecond)
+	if err != nil {
+		seelog.Warnf("Error getting network tx bytes per second: %v", err)
+	}
 	return networkStatsSet, err
 }
 
@@ -238,36 +283,18 @@ func getNetworkTxPackets(s *UsageStats) uint64 {
 	return uint64(0)
 }
 
-// GetRawUsageStats gets the array of most recent raw UsageStats, in descending
-// order of timestamps.
-func (queue *Queue) GetRawUsageStats(numStats int) ([]UsageStats, error) {
-	queue.lock.Lock()
-	defer queue.lock.Unlock()
-
-	queueLength := len(queue.buffer)
-	if queueLength == 0 {
-		return nil, fmt.Errorf("No data in the queue")
+func getNetworkRxPacketsPerSecond(s *UsageStats) float64 {
+	if s.NetworkStats != nil {
+		return float64(s.NetworkStats.RxBytesPerSecond)
 	}
+	return float64(0)
+}
 
-	if numStats > queueLength {
-		numStats = queueLength
+func getNetworkTxPacketsPerSecond(s *UsageStats) float64 {
+	if s.NetworkStats != nil {
+		return float64(s.NetworkStats.TxBytesPerSecond)
 	}
-
-	usageStats := make([]UsageStats, numStats)
-	for i := 0; i < numStats; i++ {
-		// Order such that usageStats[i].timestamp > usageStats[i+1].timestamp
-		rawUsageStat := queue.buffer[queueLength-i-1]
-		usageStats[i] = UsageStats{
-			CPUUsagePerc:      rawUsageStat.CPUUsagePerc,
-			MemoryUsageInMegs: rawUsageStat.MemoryUsageInMegs,
-			StorageReadBytes:  rawUsageStat.StorageReadBytes,
-			StorageWriteBytes: rawUsageStat.StorageWriteBytes,
-			NetworkStats:      rawUsageStat.NetworkStats,
-			Timestamp:         rawUsageStat.Timestamp,
-		}
-	}
-
-	return usageStats, nil
+	return float64(0)
 }
 
 func getCPUUsagePerc(s *UsageStats) float64 {
@@ -299,29 +326,16 @@ func getInt64WithOverflow(uintStat uint64) (int64, int64) {
 type getUsageFloatFunc func(*UsageStats) float64
 type getUsageIntFunc func(*UsageStats) uint64
 
-func (queue *Queue) resetThresholdElapsed(timeout time.Duration) bool {
-	queue.lock.RLock()
-	defer queue.lock.RUnlock()
-	duration := time.Since(queue.lastResetTime)
-	return duration.Seconds() > timeout.Seconds()
-}
-
-func (queue *Queue) enoughDatapointsInBuffer() bool {
-	queue.lock.RLock()
-	defer queue.lock.RUnlock()
-	return len(queue.buffer) >= minimumQueueDatapoints
-}
-
 // getCWStatsSet gets the stats set for either CPU or Memory based on the
 // function pointer.
-func (queue *Queue) getCWStatsSet(f getUsageFloatFunc) (*ecstcs.CWStatsSet, error) {
+func (queue *Queue) getCWStatsSet(getUsageFloat getUsageFloatFunc) (*ecstcs.CWStatsSet, error) {
 	queue.lock.Lock()
 	defer queue.lock.Unlock()
 
 	queueLength := len(queue.buffer)
 	if queueLength < 2 {
 		// Need at least 2 data points to calculate this.
-		return nil, fmt.Errorf("Need at least 2 data points in queue to calculate CW stats set")
+		return nil, fmt.Errorf("need at least 2 data points in queue to calculate CW stats set")
 	}
 
 	var min, max, sum float64
@@ -332,7 +346,11 @@ func (queue *Queue) getCWStatsSet(f getUsageFloatFunc) (*ecstcs.CWStatsSet, erro
 	sampleCount = 0
 
 	for _, stat := range queue.buffer {
-		thisStat := f(&stat)
+		if stat.sent {
+			// don't send stats to TACS if already sent
+			continue
+		}
+		thisStat := getUsageFloat(&stat)
 		if math.IsNaN(thisStat) {
 			continue
 		}
@@ -341,6 +359,11 @@ func (queue *Queue) getCWStatsSet(f getUsageFloatFunc) (*ecstcs.CWStatsSet, erro
 		max = math.Max(max, thisStat)
 		sampleCount++
 		sum += thisStat
+	}
+
+	// don't emit metrics when sampleCount == 0
+	if sampleCount == 0 {
+		return nil, fmt.Errorf("need at least 1 non-NaN data points in queue to calculate CW stats set")
 	}
 
 	return &ecstcs.CWStatsSet{
@@ -355,14 +378,14 @@ func (queue *Queue) getCWStatsSet(f getUsageFloatFunc) (*ecstcs.CWStatsSet, erro
 // stats come from docker as uint64 type, and by neccesity are packed into int64 type
 // where there is overflow (math.MaxInt64 + 1 or greater)
 // we capture the excess in optional overflow fields.
-func (queue *Queue) getULongStatsSet(f getUsageIntFunc) (*ecstcs.ULongStatsSet, error) {
+func (queue *Queue) getULongStatsSet(getUsageInt getUsageIntFunc) (*ecstcs.ULongStatsSet, error) {
 	queue.lock.Lock()
 	defer queue.lock.Unlock()
 
 	queueLength := len(queue.buffer)
 	if queueLength < 2 {
 		// Need at least 2 data points to calculate this.
-		return nil, fmt.Errorf("Need at least 2 data points in the queue to calculate int stats")
+		return nil, fmt.Errorf("need at least 2 data points in the queue to calculate int stats")
 	}
 
 	var min, max, sum uint64
@@ -373,7 +396,11 @@ func (queue *Queue) getULongStatsSet(f getUsageIntFunc) (*ecstcs.ULongStatsSet, 
 	sampleCount = 0
 
 	for _, stat := range queue.buffer {
-		thisStat := f(&stat)
+		if stat.sent {
+			// don't send stats to TACS if already sent
+			continue
+		}
+		thisStat := getUsageInt(&stat)
 		if thisStat < min {
 			min = thisStat
 		}
@@ -382,6 +409,11 @@ func (queue *Queue) getULongStatsSet(f getUsageIntFunc) (*ecstcs.ULongStatsSet, 
 		}
 		sum += thisStat
 		sampleCount++
+	}
+
+	// don't emit metrics when sampleCount == 0
+	if sampleCount == 0 {
+		return nil, fmt.Errorf("need at least 1 non-NaN data points in queue to calculate CW stats set")
 	}
 
 	baseMin, overflowMin := getInt64WithOverflow(min)
@@ -396,5 +428,52 @@ func (queue *Queue) getULongStatsSet(f getUsageIntFunc) (*ecstcs.ULongStatsSet, 
 		SampleCount: &sampleCount,
 		Sum:         &baseSum,
 		OverflowSum: &overflowSum,
+	}, nil
+}
+
+// getUDoubleCWStatsSet gets the stats set for per second network metrics
+func (queue *Queue) getUDoubleCWStatsSet(getUsageFloat getUsageFloatFunc) (*ecstcs.UDoubleCWStatsSet, error) {
+	queue.lock.Lock()
+	defer queue.lock.Unlock()
+
+	queueLength := len(queue.buffer)
+	if queueLength < 2 {
+		// Need at least 2 data points to calculate this.
+		return nil, fmt.Errorf("need at least 2 data points in queue to calculate CW stats set")
+	}
+
+	var min, max, sum float64
+	var sampleCount int64
+	min = math.MaxFloat64
+	max = -math.MaxFloat64
+	sum = 0
+	sampleCount = 0
+
+	for _, stat := range queue.buffer {
+		if stat.sent {
+			// don't send stats to TACS if already sent
+			continue
+		}
+		thisStat := getUsageFloat(&stat)
+		if math.IsNaN(thisStat) {
+			continue
+		}
+
+		min = math.Min(min, thisStat)
+		max = math.Max(max, thisStat)
+		sampleCount++
+		sum += thisStat
+	}
+
+	// don't emit metrics when sampleCount == 0
+	if sampleCount == 0 {
+		return nil, fmt.Errorf("need at least 1 non-NaN data points in queue to calculate CW stats set")
+	}
+
+	return &ecstcs.UDoubleCWStatsSet{
+		Max:         &max,
+		Min:         &min,
+		SampleCount: &sampleCount,
+		Sum:         &sum,
 	}, nil
 }

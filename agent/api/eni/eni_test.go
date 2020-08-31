@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -28,6 +28,63 @@ const (
 	customDNS          = "10.0.0.2"
 	customSearchDomain = "us-west-2.compute.internal"
 )
+
+var (
+	testENI = &ENI{
+		ID:                           "eni-123",
+		InterfaceAssociationProtocol: DefaultInterfaceAssociationProtocol,
+		IPV4Addresses: []*ENIIPV4Address{
+			{
+				Primary: true,
+				Address: "1.2.3.4",
+			},
+		},
+		IPV6Addresses: []*ENIIPV6Address{
+			{
+				Address: "abcd:dcba:1234:4321::",
+			},
+		},
+	}
+)
+
+func TestIsStandardENI(t *testing.T) {
+	testCases := []struct {
+		protocol   string
+		isStandard bool
+	}{
+		{
+			protocol:   "",
+			isStandard: true,
+		},
+		{
+			protocol:   DefaultInterfaceAssociationProtocol,
+			isStandard: true,
+		},
+		{
+			protocol:   VLANInterfaceAssociationProtocol,
+			isStandard: false,
+		},
+		{
+			protocol:   "invalid",
+			isStandard: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.protocol, func(t *testing.T) {
+			eni := &ENI{
+				InterfaceAssociationProtocol: tc.protocol,
+			}
+			assert.Equal(t, tc.isStandard, eni.IsStandardENI())
+		})
+	}
+
+}
+
+func TestENIToString(t *testing.T) {
+	expectedStr := `eni id:eni-123, mac: , hostname: , ipv4addresses: [1.2.3.4], ipv6addresses: [abcd:dcba:1234:4321::], dns: [], dns search: [], gateway ipv4: [][]`
+	assert.Equal(t, expectedStr, testENI.String())
+}
 
 // TestENIFromACS tests the eni information was correctly read from the acs
 func TestENIFromACS(t *testing.T) {

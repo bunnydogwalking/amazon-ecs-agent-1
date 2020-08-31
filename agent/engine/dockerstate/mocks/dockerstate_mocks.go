@@ -1,4 +1,4 @@
-// Copyright 2015-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -225,6 +225,21 @@ func (m *MockTaskEngineState) GetAllContainerIDs() []string {
 func (mr *MockTaskEngineStateMockRecorder) GetAllContainerIDs() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllContainerIDs", reflect.TypeOf((*MockTaskEngineState)(nil).GetAllContainerIDs))
+}
+
+// GetIPAddressByTaskARN mocks base method
+func (m *MockTaskEngineState) GetIPAddressByTaskARN(arg0 string) (string, bool) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetIPAddressByTaskARN", arg0)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(bool)
+	return ret0, ret1
+}
+
+// GetIPAddressByTaskARN indicates an expected call of GetIPAddressByTaskARN
+func (mr *MockTaskEngineStateMockRecorder) GetIPAddressByTaskARN(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetIPAddressByTaskARN", reflect.TypeOf((*MockTaskEngineState)(nil).GetIPAddressByTaskARN), arg0)
 }
 
 // GetTaskByIPAddress mocks base method

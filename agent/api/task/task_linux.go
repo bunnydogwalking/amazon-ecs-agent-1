@@ -1,6 +1,6 @@
 // +build linux
 
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -33,7 +33,6 @@ import (
 )
 
 const (
-	defaultCPUPeriod = 100 * time.Millisecond // 100ms
 	// With a 100ms CPU period, we can express 0.01 vCPU to 10 vCPUs
 	maxTaskVCPULimit = 10
 	// Reference: http://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerDefinition.html
@@ -229,11 +228,6 @@ func (task *Task) requiresCredentialSpecResource() bool {
 func (task *Task) initializeCredentialSpecResource(config *config.Config, credentialsManager credentials.Manager,
 	resourceFields *taskresource.ResourceFields) error {
 	return errors.New("task credentialspec is only supported on windows")
-}
-
-// getAllCredentialSpecRequirements is used to build all the credential spec requirements for the task
-func (task *Task) getAllCredentialSpecRequirements() []string {
-	return nil
 }
 
 // GetCredentialSpecResource retrieves credentialspec resource from resource map

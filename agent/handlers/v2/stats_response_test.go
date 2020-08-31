@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -17,6 +17,8 @@ package v2
 
 import (
 	"testing"
+
+	"github.com/aws/amazon-ecs-agent/agent/stats"
 
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	mock_dockerstate "github.com/aws/amazon-ecs-agent/agent/engine/dockerstate/mocks"
@@ -42,7 +44,7 @@ func TestTaskStatsResponseSuccess(t *testing.T) {
 	}
 	gomock.InOrder(
 		state.EXPECT().ContainerMapByArn(taskARN).Return(containerMap, true),
-		statsEngine.EXPECT().ContainerDockerStats(taskARN, containerID).Return(dockerStats, nil),
+		statsEngine.EXPECT().ContainerDockerStats(taskARN, containerID).Return(dockerStats, &stats.NetworkStatsPerSec{}, nil),
 	)
 
 	resp, err := NewTaskStatsResponse(taskARN, state, statsEngine)

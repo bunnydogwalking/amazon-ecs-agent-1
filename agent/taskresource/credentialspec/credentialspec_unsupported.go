@@ -1,6 +1,6 @@
 // +build !windows
 
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -18,6 +18,8 @@ package credentialspec
 import (
 	"time"
 
+	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	s3factory "github.com/aws/amazon-ecs-agent/agent/s3/factory"
@@ -96,10 +98,6 @@ func (cs *CredentialSpecResource) SteadyState() resourcestatus.ResourceStatus {
 func (cs *CredentialSpecResource) SetKnownStatus(status resourcestatus.ResourceStatus) {
 }
 
-// updateAppliedStatusUnsafe updates the resource transitioning status
-func (cs *CredentialSpecResource) updateAppliedStatusUnsafe(knownStatus resourcestatus.ResourceStatus) {
-}
-
 // SetAppliedStatus sets the applied status of resource and returns whether
 // the resource is already in a transition
 func (cs *CredentialSpecResource) SetAppliedStatus(status resourcestatus.ResourceStatus) bool {
@@ -152,4 +150,21 @@ func (cs *CredentialSpecResource) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON deserialises the raw JSON to a CredentialSpecResourceJSON struct
 func (cs *CredentialSpecResource) UnmarshalJSON(b []byte) error {
 	return errors.New("not implemented")
+}
+
+// GetAppliedStatus safely returns the currently applied status of the resource
+func (cs *CredentialSpecResource) GetAppliedStatus() resourcestatus.ResourceStatus {
+	return resourcestatus.ResourceStatusNone
+}
+
+func (cs *CredentialSpecResource) DependOnTaskNetwork() bool {
+	return false
+}
+
+func (cs *CredentialSpecResource) BuildContainerDependency(containerName string, satisfied apicontainerstatus.ContainerStatus,
+	dependent resourcestatus.ResourceStatus) {
+}
+
+func (cs *CredentialSpecResource) GetContainerDependencies(dependent resourcestatus.ResourceStatus) []apicontainer.ContainerDependency {
+	return nil
 }

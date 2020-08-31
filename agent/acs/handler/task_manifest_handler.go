@@ -1,4 +1,4 @@
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -14,13 +14,14 @@ package handler
 
 import (
 	"context"
+	"strconv"
 	"sync"
 
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/cihub/seelog"
@@ -35,7 +36,7 @@ type taskManifestHandler struct {
 	ctx                                      context.Context
 	taskEngine                               engine.TaskEngine
 	cancel                                   context.CancelFunc
-	saver                                    statemanager.Saver
+	dataClient                               data.Client
 	cluster                                  string
 	containerInstanceArn                     string
 	acsClient                                wsclient.ClientServer
@@ -47,11 +48,10 @@ type taskManifestHandler struct {
 // newTaskManifestHandler returns an instance of the taskManifestHandler struct
 func newTaskManifestHandler(ctx context.Context,
 	cluster string, containerInstanceArn string, acsClient wsclient.ClientServer,
-	saver statemanager.Saver, taskEngine engine.TaskEngine, latestSeqNumberTaskManifest *int64) taskManifestHandler {
+	dataClient data.Client, taskEngine engine.TaskEngine, latestSeqNumberTaskManifest *int64) taskManifestHandler {
 
 	// Create a cancelable context from the parent context
 	derivedContext, cancel := context.WithCancel(ctx)
-
 	return taskManifestHandler{
 		messageBufferTaskManifest:                make(chan *ecsacs.TaskManifestMessage),
 		messageBufferTaskManifestAck:             make(chan string),
@@ -63,7 +63,7 @@ func newTaskManifestHandler(ctx context.Context,
 		containerInstanceArn:                     containerInstanceArn,
 		acsClient:                                acsClient,
 		taskEngine:                               taskEngine,
-		saver:                                    saver,
+		dataClient:                               dataClient,
 		latestSeqNumberTaskManifest:              latestSeqNumberTaskManifest,
 	}
 }
@@ -186,7 +186,7 @@ func (taskManifestHandler *taskManifestHandler) sendTaskStopVerificationMessage(
 
 // compares the list of tasks received in the task manifest message and tasks running on the the instance
 // It returns all the task that are running on the instance but not present in task manifest message task list
-func compareTasks(receivedTaskList []*ecsacs.TaskIdentifier, runningTaskList []*apitask.Task) []*ecsacs.TaskIdentifier {
+func compareTasks(receivedTaskList []*ecsacs.TaskIdentifier, runningTaskList []*apitask.Task, clusterARN string) []*ecsacs.TaskIdentifier {
 	tasksToBeKilled := make([]*ecsacs.TaskIdentifier, 0)
 	for _, runningTask := range runningTaskList {
 		// For every task running on the instance check if the task is present in receivedTaskList with the DesiredState
@@ -203,8 +203,9 @@ func compareTasks(receivedTaskList []*ecsacs.TaskIdentifier, runningTaskList []*
 			}
 			if !taskPresent {
 				tasksToBeKilled = append(tasksToBeKilled, &ecsacs.TaskIdentifier{
-					DesiredStatus: aws.String(apitaskstatus.TaskStoppedString),
-					TaskArn:       aws.String(runningTask.Arn),
+					DesiredStatus:  aws.String(apitaskstatus.TaskStoppedString),
+					TaskArn:        aws.String(runningTask.Arn),
+					TaskClusterArn: aws.String(clusterARN),
 				})
 			}
 		}
@@ -239,6 +240,7 @@ func (taskManifestHandler *taskManifestHandler) handleTaskManifestSingleMessage(
 	message *ecsacs.TaskManifestMessage) error {
 	taskListManifestHandler := message.Tasks
 	seqNumberFromMessage := *message.Timeline
+	clusterARN := *message.ClusterArn
 	agentLatestSequenceNumber := *taskManifestHandler.latestSeqNumberTaskManifest
 
 	// Check if the sequence number of message received is more than the one stored in Agent
@@ -247,14 +249,14 @@ func (taskManifestHandler *taskManifestHandler) handleTaskManifestSingleMessage(
 		if err != nil {
 			return err
 		}
-		// Update state file
 		*taskManifestHandler.latestSeqNumberTaskManifest = *message.Timeline
-		err = taskManifestHandler.saver.Save()
+		// Save the new sequence number to disk.
+		err = taskManifestHandler.dataClient.SaveMetadata(data.TaskManifestSeqNumKey, strconv.FormatInt(*message.Timeline, 10))
 		if err != nil {
 			return err
 		}
 
-		tasksToKill := compareTasks(taskListManifestHandler, runningTasksOnInstance)
+		tasksToKill := compareTasks(taskListManifestHandler, runningTasksOnInstance, clusterARN)
 
 		// Update messageId so that it can be compared to the messageId in TaskStopVerificationAck message
 		taskManifestHandler.setMessageId(*message.MessageId)

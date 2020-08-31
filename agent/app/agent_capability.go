@@ -1,4 +1,4 @@
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -58,7 +58,31 @@ const (
 	capabilityFullTaskSync                      = "full-sync"
 	capabilityGMSA                              = "gmsa"
 	capabilityEFS                               = "efs"
+	capabilityEFSAuth                           = "efsAuth"
+	capabilityEnvFilesS3                        = "env-files.s3"
 )
+
+var nameOnlyAttributes = []string{
+	// ecs agent version 1.19.0 supports private registry authentication using
+	// aws secrets manager
+	capabilityPrivateRegistryAuthASM,
+	// ecs agent version 1.22.0 supports ecs secrets integrating with aws systems manager
+	capabilitySecretEnvSSM,
+	// ecs agent version 1.27.0 supports ecs secrets for logging drivers
+	capabilitySecretLogDriverSSM,
+	// support ecr endpoint override
+	capabilityECREndpoint,
+	// ecs agent version 1.23.0 supports ecs secrets integrating with aws secrets manager
+	capabilitySecretEnvASM,
+	// ecs agent version 1.27.0 supports ecs secrets for logging drivers
+	capabilitySecretLogDriverASM,
+	// support container ordering in agent
+	capabilityContainerOrdering,
+	// support full task sync
+	capabilityFullTaskSync,
+	// ecs agent version 1.39.0 supports bulk loading env vars through environmentFiles in S3
+	capabilityEnvFilesS3,
+}
 
 // capabilities returns the supported capabilities of this agent / docker-client pair.
 // Currently, the following capabilities are possible:
@@ -104,10 +128,16 @@ const (
 //    ecs.capability.firelens.options.config.s3
 //    ecs.capability.full-sync
 //    ecs.capability.gmsa
+//    ecs.capability.efsAuth
+//    ecs.capability.env-files.s3
 func (agent *ecsAgent) capabilities() ([]*ecs.Attribute, error) {
 	var capabilities []*ecs.Attribute
 
-	if !agent.cfg.PrivilegedDisabled {
+	for _, cap := range nameOnlyAttributes {
+		capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+cap)
+	}
+
+	if !agent.cfg.PrivilegedDisabled.Enabled() {
 		capabilities = appendNameOnlyAttribute(capabilities, capabilityPrefix+"privileged-container")
 	}
 
@@ -121,10 +151,10 @@ func (agent *ecsAgent) capabilities() ([]*ecs.Attribute, error) {
 
 	capabilities = agent.appendLoggingDriverCapabilities(capabilities)
 
-	if agent.cfg.SELinuxCapable {
+	if agent.cfg.SELinuxCapable.Enabled() {
 		capabilities = appendNameOnlyAttribute(capabilities, capabilityPrefix+"selinux")
 	}
-	if agent.cfg.AppArmorCapable {
+	if agent.cfg.AppArmorCapable.Enabled() {
 		capabilities = appendNameOnlyAttribute(capabilities, capabilityPrefix+"apparmor")
 	}
 
@@ -141,39 +171,15 @@ func (agent *ecsAgent) capabilities() ([]*ecs.Attribute, error) {
 
 	// TODO: gate this on docker api version when ecs supported docker includes
 	// credentials endpoint feature from upstream docker
-	if agent.cfg.OverrideAWSLogsExecutionRole {
+	if agent.cfg.OverrideAWSLogsExecutionRole.Enabled() {
 		capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+"execution-role-awslogs")
 	}
 
 	capabilities = agent.appendVolumeDriverCapabilities(capabilities)
 
-	// ecs agent version 1.19.0 supports private registry authentication using
-	// aws secrets manager
-	capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilityPrivateRegistryAuthASM)
-
-	// ecs agent version 1.22.0 supports ecs secrets integrating with aws systems manager
-	capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilitySecretEnvSSM)
-
-	// ecs agent version 1.27.0 supports ecs secrets for logging drivers
-	capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilitySecretLogDriverSSM)
-
 	if agent.cfg.GPUSupportEnabled {
 		capabilities = agent.appendNvidiaDriverVersionAttribute(capabilities)
 	}
-	// support ecr endpoint override
-	capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilityECREndpoint)
-
-	// ecs agent version 1.23.0 supports ecs secrets integrating with aws secrets manager
-	capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilitySecretEnvASM)
-
-	// ecs agent version 1.27.0 supports ecs secrets for logging drivers
-	capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilitySecretLogDriverASM)
-
-	// support container ordering in agent
-	capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilityContainerOrdering)
-
-	// support full task sync
-	capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilityFullTaskSync)
 
 	// ecs agent version 1.22.0 supports sharing PID namespaces and IPC resource namespaces
 	// with host EC2 instance and among containers within the task
@@ -203,6 +209,11 @@ func (agent *ecsAgent) capabilities() ([]*ecs.Attribute, error) {
 	// support GMSA capabilities
 	capabilities = agent.appendGMSACapabilities(capabilities)
 
+	// support efs auth on ecs capabilities
+	for _, cap := range agent.cfg.VolumePluginCapabilities {
+		capabilities = agent.appendEFSVolumePluginCapabilities(capabilities, cap)
+	}
+
 	return capabilities, nil
 }
 
@@ -213,7 +224,7 @@ func (agent *ecsAgent) appendDockerDependentCapabilities(capabilities []*ecs.Att
 		capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+"execution-role-ecr-pull")
 	}
 
-	if _, ok := supportedVersions[dockerclient.Version_1_24]; ok && !agent.cfg.DisableDockerHealthCheck {
+	if _, ok := supportedVersions[dockerclient.Version_1_24]; ok && !agent.cfg.DisableDockerHealthCheck.Enabled() {
 		// Docker health check was added in API 1.24
 		capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+"container-health-check")
 	}
@@ -238,7 +249,7 @@ func (agent *ecsAgent) appendLoggingDriverCapabilities(capabilities []*ecs.Attri
 }
 
 func (agent *ecsAgent) appendTaskIamRoleCapabilities(capabilities []*ecs.Attribute, supportedVersions map[dockerclient.DockerVersion]bool) []*ecs.Attribute {
-	if agent.cfg.TaskIAMRoleEnabled {
+	if agent.cfg.TaskIAMRoleEnabled.Enabled() {
 		// The "task-iam-role" capability is supported for docker v1.7.x onwards
 		// Refer https://github.com/docker/docker/blob/master/docs/reference/api/docker_remote_api.md
 		// to lookup the table of docker supportedVersions to API supportedVersions
@@ -264,20 +275,20 @@ func (agent *ecsAgent) appendTaskCPUMemLimitCapabilities(capabilities []*ecs.Att
 	if agent.cfg.TaskCPUMemLimit.Enabled() {
 		if _, ok := supportedVersions[dockerclient.Version_1_22]; ok {
 			capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilityTaskCPUMemLimit)
-		} else if agent.cfg.TaskCPUMemLimit == config.ExplicitlyEnabled {
+		} else if agent.cfg.TaskCPUMemLimit.Value == config.ExplicitlyEnabled {
 			// explicitly enabled -- return an error because we cannot fulfil an explicit request
 			return nil, errors.New("engine: Task CPU + Mem limit cannot be enabled due to unsupported Docker version")
 		} else {
 			// implicitly enabled -- don't register the capability, but degrade gracefully
 			seelog.Warn("Task CPU + Mem Limit disabled due to unsupported Docker version. API version 1.22 or greater is required.")
-			agent.cfg.TaskCPUMemLimit = config.ExplicitlyDisabled
+			agent.cfg.TaskCPUMemLimit.Value = config.ExplicitlyDisabled
 		}
 	}
 	return capabilities, nil
 }
 
 func (agent *ecsAgent) appendTaskENICapabilities(capabilities []*ecs.Attribute) []*ecs.Attribute {
-	if agent.cfg.TaskENIEnabled {
+	if agent.cfg.TaskENIEnabled.Enabled() {
 		// The assumption here is that all of the dependencies for supporting the
 		// Task ENI in the Agent have already been validated prior to the invocation of
 		// the `agent.capabilities()` call
@@ -291,7 +302,7 @@ func (agent *ecsAgent) appendTaskENICapabilities(capabilities []*ecs.Attribute) 
 		capabilities = append(capabilities, taskENIVersionAttribute)
 
 		// We only care about AWSVPCBlockInstanceMetdata if Task ENI is enabled
-		if agent.cfg.AWSVPCBlockInstanceMetdata {
+		if agent.cfg.AWSVPCBlockInstanceMetdata.Enabled() {
 			// If the Block Instance Metadata flag is set for AWS VPC networking mode, register a capability
 			// indicating the same
 			capabilities = append(capabilities, &ecs.Attribute{

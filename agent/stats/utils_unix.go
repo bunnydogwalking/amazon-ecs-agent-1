@@ -1,5 +1,5 @@
 // +build !windows
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -23,12 +23,6 @@ import (
 
 // dockerStatsToContainerStats returns a new object of the ContainerStats object from docker stats.
 func dockerStatsToContainerStats(dockerStats *types.StatsJSON) (*ContainerStats, error) {
-	// The length of PercpuUsage represents the number of cores in an instance.
-	if len(dockerStats.CPUStats.CPUUsage.PercpuUsage) == 0 || numCores == uint64(0) {
-		seelog.Debug("Invalid container statistics reported, no cpu core usage reported")
-		return nil, fmt.Errorf("Invalid container statistics reported, no cpu core usage reported")
-	}
-
 	cpuUsage := dockerStats.CPUStats.CPUUsage.TotalUsage / numCores
 	memoryUsage := dockerStats.MemoryStats.Usage - dockerStats.MemoryStats.Stats["cache"]
 	storageReadBytes, storageWriteBytes := getStorageStats(dockerStats)
@@ -41,6 +35,14 @@ func dockerStatsToContainerStats(dockerStats *types.StatsJSON) (*ContainerStats,
 		networkStats:      networkStats,
 		timestamp:         dockerStats.Read,
 	}, nil
+}
+
+func validateDockerStats(dockerStats *types.StatsJSON) error {
+	// The length of PercpuUsage represents the number of cores in an instance.
+	if len(dockerStats.CPUStats.CPUUsage.PercpuUsage) == 0 || numCores == uint64(0) {
+		return fmt.Errorf("invalid container statistics reported, no cpu core usage reported")
+	}
+	return nil
 }
 
 func getStorageStats(dockerStats *types.StatsJSON) (uint64, uint64) {

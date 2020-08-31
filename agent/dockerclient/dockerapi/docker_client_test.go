@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -74,6 +74,7 @@ const (
 	xMaximumPullRetryDelay     = 100 * time.Microsecond
 	xPullRetryDelayMultiplier  = 2
 	xPullRetryJitterMultiplier = 0.2
+	dockerEventBufferSize      = 100
 )
 
 func defaultTestConfig() *config.Config {
@@ -1044,10 +1045,10 @@ func TestStatsNormalExit(t *testing.T) {
 	}, nil)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	stats, err := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
-	assert.NoError(t, err)
+	stats, _ := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
 	newStat := <-stats
 	waitForStats(t, newStat)
+
 	assert.Equal(t, uint64(50), newStat.MemoryStats.Usage)
 	assert.Equal(t, uint64(100), newStat.CPUStats.SystemUsage)
 }
@@ -1063,9 +1064,9 @@ func TestStatsErrorReading(t *testing.T) {
 	}, errors.New("test error"))
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	stats, err := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
-	assert.NoError(t, err)
-	assert.Nil(t, <-stats)
+	_, errC := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
+
+	assert.Error(t, <-errC)
 }
 
 func TestStatsErrorDecoding(t *testing.T) {
@@ -1079,9 +1080,8 @@ func TestStatsErrorDecoding(t *testing.T) {
 	}, nil)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	stats, err := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
-	assert.NoError(t, err)
-	assert.Nil(t, <-stats)
+	_, errC := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
+	assert.Error(t, <-errC)
 }
 
 func TestStatsClientError(t *testing.T) {
@@ -1094,10 +1094,13 @@ func TestStatsClientError(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	_, err := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
-	if err == nil {
-		t.Fatal("Expected error with nil docker client")
-	}
+	statsC, errC := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
+	// should get an error from the channel
+	err := <-errC
+	// stats channel should be closed (ok=false)
+	_, ok := <-statsC
+	assert.False(t, ok)
+	assert.Error(t, err)
 }
 
 type mockStream struct {
@@ -1156,11 +1159,8 @@ func TestStatsInactivityTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	stats, err := client.Stats(ctx, "foo", shortInactivityTimeout)
-	assert.NoError(t, err)
-	newStat := <-stats
-
-	assert.Nil(t, newStat)
+	_, errC := client.Stats(ctx, "foo", shortInactivityTimeout)
+	assert.Error(t, <-errC)
 }
 
 func TestStatsInactivityTimeoutNoHit(t *testing.T) {
@@ -1176,8 +1176,7 @@ func TestStatsInactivityTimeoutNoHit(t *testing.T) {
 	}, nil)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	stats, err := client.Stats(ctx, "foo", longInactivityTimeout)
-	assert.NoError(t, err)
+	stats, _ := client.Stats(ctx, "foo", longInactivityTimeout)
 	newStat := <-stats
 
 	waitForStats(t, newStat)

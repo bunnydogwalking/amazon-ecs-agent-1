@@ -1,4 +1,4 @@
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -14,6 +14,7 @@
 package tcshandler
 
 import (
+	"context"
 	"io"
 	"net/url"
 	"strings"
@@ -33,10 +34,6 @@ import (
 )
 
 const (
-	// defaultPublishMetricsInterval is the interval at which utilization
-	// metrics from stats engine are published to the backend.
-	defaultPublishMetricsInterval = 20 * time.Second
-
 	// The maximum time to wait between heartbeats without disconnecting
 	defaultHeartbeatTimeout = 1 * time.Minute
 	defaultHeartbeatJitter  = 1 * time.Minute
@@ -84,8 +81,14 @@ func StartSession(params *TelemetrySessionParams, statsEngine stats.Engine) erro
 			seelog.Info("TCS Websocket connection closed for a valid reason")
 			backoff.Reset()
 		} else {
-			seelog.Infof("Error from tcs; backing off: %v", tcsError)
+			seelog.Errorf("Error: lost websocket connection with ECS Telemetry service (TCS): %v", tcsError)
 			params.time().Sleep(backoff.Duration())
+		}
+		select {
+		case <-params.Ctx.Done():
+			seelog.Info("TCS session exited cleanly.")
+			return nil
+		default:
 		}
 	}
 }
@@ -97,12 +100,14 @@ func startTelemetrySession(params *TelemetrySessionParams, statsEngine stats.Eng
 		return err
 	}
 	url := formatURL(tcsEndpoint, params.Cfg.Cluster, params.ContainerInstanceArn, params.TaskEngine)
-	return startSession(url, params.Cfg, params.CredentialProvider, statsEngine,
-		defaultHeartbeatTimeout, defaultHeartbeatJitter, defaultPublishMetricsInterval,
+	return startSession(params.Ctx, url, params.Cfg, params.CredentialProvider, statsEngine,
+		defaultHeartbeatTimeout, defaultHeartbeatJitter, config.DefaultContainerMetricsPublishInterval,
 		params.DeregisterInstanceEventStream)
 }
 
-func startSession(url string,
+func startSession(
+	ctx context.Context,
+	url string,
 	cfg *config.Config,
 	credentialProvider *credentials.Credentials,
 	statsEngine stats.Engine,
@@ -110,7 +115,7 @@ func startSession(url string,
 	publishMetricsInterval time.Duration,
 	deregisterInstanceEventStream *eventstream.EventStream) error {
 	client := tcsclient.New(url, cfg, credentialProvider, statsEngine,
-		publishMetricsInterval, wsRWTimeout, cfg.DisableMetrics)
+		publishMetricsInterval, wsRWTimeout, cfg.DisableMetrics.Enabled())
 	defer client.Close()
 
 	err := deregisterInstanceEventStream.Subscribe(deregisterContainerInstanceHandler, client.Disconnect)
@@ -128,18 +133,27 @@ func startSession(url string,
 	// start a timer and listens for tcs heartbeats/acks. The timer is reset when
 	// we receive a heartbeat from the server or when a publish metrics message
 	// is acked.
-	timer := time.AfterFunc(retry.AddJitter(heartbeatTimeout, heartbeatJitter), func() {
-		// Close the connection if there haven't been any messages received from backend
-		// for a long time.
-		seelog.Info("TCS Connection hasn't had any activity for too long; disconnecting")
-		client.Disconnect()
-	})
+	timer := time.NewTimer(retry.AddJitter(heartbeatTimeout, heartbeatJitter))
 	defer timer.Stop()
 	client.AddRequestHandler(heartbeatHandler(timer))
 	client.AddRequestHandler(ackPublishMetricHandler(timer))
 	client.AddRequestHandler(ackPublishHealthMetricHandler(timer))
 	client.SetAnyRequestHandler(anyMessageHandler(client))
-	return client.Serve()
+	serveC := make(chan error)
+	go func() {
+		serveC <- client.Serve()
+	}()
+	select {
+	case <-ctx.Done():
+		// outer context done, agent is exiting
+		client.Disconnect()
+	case <-timer.C:
+		seelog.Info("TCS Connection hasn't had any activity for too long; disconnecting")
+		client.Disconnect()
+	case err := <-serveC:
+		return err
+	}
+	return nil
 }
 
 // heartbeatHandler resets the heartbeat timer when HeartbeatMessage message is received from tcs.

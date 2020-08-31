@@ -1,6 +1,6 @@
 // +build windows,unit
 
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -27,4 +27,16 @@ func TestParseGMSACapability(t *testing.T) {
 	defer os.Unsetenv("ECS_GMSA_SUPPORTED")
 
 	assert.False(t, parseGMSACapability())
+}
+
+func TestParseBooleanEnvVar(t *testing.T) {
+	os.Setenv("EXAMPLE_SETTING", "True")
+	defer os.Unsetenv("EXAMPLE_SETTING")
+
+	assert.True(t, parseBooleanDefaultFalseConfig("EXAMPLE_SETTING").Enabled())
+	assert.True(t, parseBooleanDefaultTrueConfig("EXAMPLE_SETTING").Enabled())
+
+	os.Setenv("EXAMPLE_SETTING", "False")
+	assert.False(t, parseBooleanDefaultFalseConfig("EXAMPLE_SETTING").Enabled())
+	assert.False(t, parseBooleanDefaultTrueConfig("EXAMPLE_SETTING").Enabled())
 }

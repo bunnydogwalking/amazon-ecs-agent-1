@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -220,7 +220,7 @@ func newContainerResponse(dockerContainer *apicontainer.DockerContainer,
 		resp.FinishedAt = &finishedAt
 	}
 
-	for _, binding := range container.Ports {
+	for _, binding := range container.GetKnownPortBindings() {
 		port := v1.PortResponse{
 			ContainerPort: binding.ContainerPort,
 			Protocol:      binding.Protocol.String(),

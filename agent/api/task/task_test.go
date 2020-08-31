@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -45,10 +45,10 @@ import (
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
-	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
 	"github.com/aws/aws-sdk-go/service/secretsmanager"
 
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/asmsecret"
+	"github.com/aws/amazon-ecs-agent/agent/taskresource/envFiles"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/ssmsecret"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/docker/docker/api/types"
@@ -58,33 +58,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-const (
-	dockerIDPrefix    = "dockerid-"
-	secretKeyWest1    = "/test/secretName_us-west-2"
-	secKeyLogDriver   = "/test/secretName1_us-west-1"
-	asmSecretKeyWest1 = "arn:aws:secretsmanager:us-west-2:11111:secret:/test/secretName_us-west-2"
-	ipv4              = "10.0.0.1"
-	mac               = "1.2.3.4"
-	ipv6              = "f0:234:23"
-	ignoredUID        = "1337"
-	proxyIngressPort  = "15000"
-	proxyEgressPort   = "15001"
-	appPort           = "9000"
-	egressIgnoredIP   = "169.254.169.254"
-)
-
-var defaultDockerClientAPIVersion = dockerclient.Version_1_17
-
-func strptr(s string) *string { return &s }
-
-func dockerMap(task *Task) map[string]*apicontainer.DockerContainer {
-	m := make(map[string]*apicontainer.DockerContainer)
-	for _, container := range task.Containers {
-		m[container.Name] = &apicontainer.DockerContainer{DockerID: dockerIDPrefix + container.Name, DockerName: "dockername-" + container.Name, Container: container}
-	}
-	return m
-}
 
 func TestDockerConfigPortBinding(t *testing.T) {
 	testTask := &Task{
@@ -121,7 +94,8 @@ func TestDockerHostConfigCPUShareZero(t *testing.T) {
 		},
 	}
 
-	hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -145,7 +119,8 @@ func TestDockerHostConfigCPUShareMinimum(t *testing.T) {
 		},
 	}
 
-	hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -170,7 +145,8 @@ func TestDockerHostConfigCPUShareUnchanged(t *testing.T) {
 		},
 	}
 
-	hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -195,7 +171,8 @@ func TestDockerHostConfigPortBinding(t *testing.T) {
 		},
 	}
 
-	config, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	config, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
 
 	bindings, ok := config.PortBindings["10/tcp"]
@@ -222,7 +199,8 @@ func TestDockerHostConfigVolumesFrom(t *testing.T) {
 		},
 	}
 
-	config, err := testTask.DockerHostConfig(testTask.Containers[1], dockerMap(testTask), defaultDockerClientAPIVersion)
+	config, err := testTask.DockerHostConfig(testTask.Containers[1], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
 
 	if !reflect.DeepEqual(config.VolumesFrom, []string{"dockername-c1"}) {
@@ -267,7 +245,8 @@ func TestDockerHostConfigRawConfig(t *testing.T) {
 		},
 	}
 
-	config, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	config, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, configErr)
 
 	expectedOutput := rawHostConfigInput
@@ -301,20 +280,23 @@ func TestDockerHostConfigPauseContainer(t *testing.T) {
 	pauseContainer := testTask.Containers[1]
 	// Verify that the network mode is set to "container:<pause-container-docker-id>"
 	// for a non pause container
-	config, err := testTask.DockerHostConfig(customContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
+	cfg, err := testTask.DockerHostConfig(customContainer, dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
-	assert.Equal(t, "container:"+dockerIDPrefix+NetworkPauseContainerName, string(config.NetworkMode))
+	assert.Equal(t, "container:"+dockerIDPrefix+NetworkPauseContainerName, string(cfg.NetworkMode))
 
 	// Verify that the network mode is not set to "none"  for the
 	// empty volume container
-	config, err = testTask.DockerHostConfig(testTask.Containers[1], dockerMap(testTask), defaultDockerClientAPIVersion)
+	cfg, err = testTask.DockerHostConfig(testTask.Containers[1], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
-	assert.Equal(t, networkModeNone, string(config.NetworkMode))
+	assert.Equal(t, networkModeNone, string(cfg.NetworkMode))
 
 	// Verify that the network mode is set to "none" for the pause container
-	config, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
+	cfg, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
-	assert.Equal(t, networkModeNone, string(config.NetworkMode))
+	assert.Equal(t, networkModeNone, string(cfg.NetworkMode))
 
 	// Verify that overridden DNS settings are set for the pause container
 	// and not set for non pause containers
@@ -323,25 +305,28 @@ func TestDockerHostConfigPauseContainer(t *testing.T) {
 
 	// DNS overrides are only applied to the pause container. Verify that the non-pause
 	// container contains no overrides
-	config, err = testTask.DockerHostConfig(customContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
+	cfg, err = testTask.DockerHostConfig(customContainer, dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
-	assert.Equal(t, 0, len(config.DNS))
-	assert.Equal(t, 0, len(config.DNSSearch))
+	assert.Equal(t, 0, len(cfg.DNS))
+	assert.Equal(t, 0, len(cfg.DNSSearch))
 
 	// Verify DNS settings are overridden for the pause container
-	config, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
+	cfg, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
-	assert.Equal(t, []string{"169.254.169.253"}, config.DNS)
-	assert.Equal(t, []string{"us-west-2.compute.internal"}, config.DNSSearch)
+	assert.Equal(t, []string{"169.254.169.253"}, cfg.DNS)
+	assert.Equal(t, []string{"us-west-2.compute.internal"}, cfg.DNSSearch)
 
 	// Verify eni ExtraHosts  added to HostConfig for pause container
 	ipaddr := &apieni.ENIIPV4Address{Primary: true, Address: "10.0.1.1"}
 	testTask.ENIs[0].IPV4Addresses = []*apieni.ENIIPV4Address{ipaddr}
 	testTask.ENIs[0].PrivateDNSName = "eni.ip.region.compute.internal"
 
-	config, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion)
+	cfg, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
-	assert.Equal(t, []string{"eni.ip.region.compute.internal:10.0.1.1"}, config.ExtraHosts)
+	assert.Equal(t, []string{"eni.ip.region.compute.internal:10.0.1.1"}, cfg.ExtraHosts)
 
 	// Verify eni Hostname is added to DockerConfig for pause container
 	dockerconfig, dockerConfigErr := testTask.DockerConfig(pauseContainer, defaultDockerClientAPIVersion)
@@ -365,7 +350,8 @@ func TestBadDockerHostConfigRawConfig(t *testing.T) {
 				},
 			},
 		}
-		_, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(&testTask), defaultDockerClientAPIVersion)
+		_, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(&testTask), defaultDockerClientAPIVersion,
+			&config.Config{})
 		assert.Error(t, err)
 	}
 }
@@ -691,36 +677,7 @@ func TestPostUnmarshalTaskWithDockerVolumes(t *testing.T) {
 // Test that the PostUnmarshal function properly changes EfsVolumeConfiguration
 // task definitions into a dockerVolumeConfiguration task resource.
 func TestPostUnmarshalTaskWithEFSVolumes(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
-	dockerClient.EXPECT().InspectVolume(gomock.Any(), gomock.Any(), gomock.Any()).Return(dockerapi.SDKVolumeResponse{DockerVolume: &types.Volume{}})
-	taskFromACS := ecsacs.Task{
-		Arn:           strptr("myArn"),
-		DesiredStatus: strptr("RUNNING"),
-		Family:        strptr("myFamily"),
-		Version:       strptr("1"),
-		Containers: []*ecsacs.Container{
-			{
-				Name: strptr("myName1"),
-				MountPoints: []*ecsacs.MountPoint{
-					{
-						ContainerPath: strptr("/some/path"),
-						SourceVolume:  strptr("efsvolume"),
-					},
-				},
-			},
-		},
-		Volumes: []*ecsacs.Volume{
-			{
-				Name: strptr("efsvolume"),
-				Type: strptr("efs"),
-				EfsVolumeConfiguration: &ecsacs.EFSVolumeConfiguration{
-					FileSystemId:  strptr("fs-12345"),
-					RootDirectory: strptr("/tmp"),
-				},
-			},
-		},
-	}
+	taskFromACS := getACSEFSTask()
 	seqNum := int64(42)
 
 	testCases := map[string]string{
@@ -731,12 +688,12 @@ func TestPostUnmarshalTaskWithEFSVolumes(t *testing.T) {
 	}
 	for region, expectedHostname := range testCases {
 		t.Run(region, func(t *testing.T) {
-			task, err := TaskFromACS(&taskFromACS, &ecsacs.PayloadMessage{SeqNum: &seqNum})
+			task, err := TaskFromACS(taskFromACS, &ecsacs.PayloadMessage{SeqNum: &seqNum})
 			assert.Nil(t, err, "Should be able to handle acs task")
 			assert.Equal(t, 1, len(task.Containers)) // before PostUnmarshalTask
 			cfg := config.Config{}
 			cfg.AWSRegion = region
-			task.PostUnmarshalTask(&cfg, nil, nil, dockerClient, nil)
+			require.NoError(t, task.PostUnmarshalTask(&cfg, nil, nil, nil, nil))
 			assert.Equal(t, 1, len(task.Containers), "Should match the number of containers as before PostUnmarshalTask")
 			assert.Equal(t, 1, len(task.Volumes), "Should have 1 volume")
 			taskVol := task.Volumes[0]
@@ -773,6 +730,63 @@ func TestPostUnmarshalTaskWithEFSVolumes(t *testing.T) {
 	}
 }
 
+func TestPostUnmarshalTaskWithEFSVolumesThatUseECSVolumePlugin(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	testCreds := getACSIAMRoleCredentials()
+	credentialsIDInTask := aws.StringValue(testCreds.CredentialsId)
+	credentialsManager := mock_credentials.NewMockManager(ctrl)
+	taskCredentials := credentials.TaskIAMRoleCredentials{
+		IAMRoleCredentials: credentials.IAMRoleCredentials{CredentialsID: credentialsIDInTask},
+	}
+	expectedEndpoint := "/v2/credentials/" + credentialsIDInTask
+	credentialsManager.EXPECT().GetTaskCredentials(credentialsIDInTask).Return(taskCredentials, true)
+
+	taskFromACS := getACSEFSTask()
+	taskFromACS.RoleCredentials = testCreds
+	seqNum := int64(42)
+	task, err := TaskFromACS(taskFromACS, &ecsacs.PayloadMessage{SeqNum: &seqNum})
+	assert.Nil(t, err, "Should be able to handle acs task")
+	assert.Equal(t, 1, len(task.Containers))
+	task.SetCredentialsID(aws.StringValue(testCreds.CredentialsId))
+
+	cfg := &config.Config{}
+	cfg.VolumePluginCapabilities = []string{"efsAuth"}
+	require.NoError(t, task.PostUnmarshalTask(cfg, credentialsManager, nil, nil, nil))
+	assert.Equal(t, 1, len(task.Containers), "Should match the number of containers as before PostUnmarshalTask")
+	assert.Equal(t, 1, len(task.Volumes), "Should have 1 volume")
+	taskVol := task.Volumes[0]
+	assert.Equal(t, "efsvolume", taskVol.Name)
+	assert.Equal(t, "efs", taskVol.Type)
+
+	resources := task.GetResources()
+	assert.Len(t, resources, 1)
+	vol, ok := resources[0].(*taskresourcevolume.VolumeResource)
+	require.True(t, ok)
+	dockerVolName := vol.VolumeConfig.DockerVolumeName
+	b, err := json.Marshal(resources[0])
+	require.NoError(t, err)
+	assert.JSONEq(t, fmt.Sprintf(`{
+		"name": "efsvolume",
+		"dockerVolumeConfiguration": {
+		  "scope": "task",
+		  "autoprovision": false,
+		  "mountPoint": "",
+		  "driver": "amazon-ecs-volume-plugin",
+		  "driverOpts": {
+			"device": "fs-12345:/tmp",
+			"o": "tls,tlsport=12345,iam,awscredsuri=%s,accesspoint=fsap-123",
+			"type": "efs"
+		  },
+		  "labels": {},
+		  "dockerVolumeName": "%s"
+		},
+		"createdAt": "0001-01-01T00:00:00Z",
+		"desiredStatus": "NONE",
+		"knownStatus": "NONE"
+	  }`, expectedEndpoint, dockerVolName), string(b))
+}
+
 func TestInitializeContainersV3MetadataEndpoint(t *testing.T) {
 	task := Task{
 		Containers: []*apicontainer.Container{
@@ -790,6 +804,25 @@ func TestInitializeContainersV3MetadataEndpoint(t *testing.T) {
 	assert.Equal(t, container.GetV3EndpointID(), "new-uuid")
 	assert.Equal(t, container.Environment[apicontainer.MetadataURIEnvironmentVariableName],
 		fmt.Sprintf(apicontainer.MetadataURIFormat, "new-uuid"))
+}
+
+func TestInitializeContainersV4MetadataEndpoint(t *testing.T) {
+	task := Task{
+		Containers: []*apicontainer.Container{
+			{
+				Name:        "c1",
+				Environment: make(map[string]string),
+			},
+		},
+	}
+	container := task.Containers[0]
+
+	task.initializeContainersV4MetadataEndpoint(utils.NewStaticUUIDProvider("new-uuid"))
+
+	// Test if the v3 endpoint id is set and the endpoint is injected to env
+	assert.Equal(t, container.GetV3EndpointID(), "new-uuid")
+	assert.Equal(t, container.Environment[apicontainer.MetadataURIEnvVarNameV4],
+		fmt.Sprintf(apicontainer.MetadataURIFormatV4, "new-uuid"))
 }
 
 func TestPostUnmarshalTaskWithLocalVolumes(t *testing.T) {
@@ -960,7 +993,8 @@ func TestNamespaceProvisionDependencyAndHostConfig(t *testing.T) {
 			docMaps := dockerMap(task)
 			for _, container := range task.Containers {
 				//configure HostConfig for each container
-				dockHostCfg, err := task.DockerHostConfig(container, docMaps, defaultDockerClientAPIVersion)
+				dockHostCfg, err := task.DockerHostConfig(container, docMaps, defaultDockerClientAPIVersion,
+					&config.Config{})
 				assert.Nil(t, err)
 				assert.Equal(t, task.IPCMode, string(dockHostCfg.IpcMode))
 				assert.Equal(t, task.PIDMode, string(dockHostCfg.PidMode))
@@ -992,7 +1026,8 @@ func TestNamespaceProvisionDependencyAndHostConfig(t *testing.T) {
 
 			for _, container := range task.Containers {
 				//configure HostConfig for each container
-				dockHostCfg, err := task.DockerHostConfig(container, docMaps, defaultDockerClientAPIVersion)
+				dockHostCfg, err := task.DockerHostConfig(container, docMaps, defaultDockerClientAPIVersion,
+					&config.Config{})
 				assert.Nil(t, err)
 				if namespacePause == container {
 					// Expected behavior for IPCMode="task" is "shareable"
@@ -1072,8 +1107,6 @@ func TestAddNamespaceSharingProvisioningDependency(t *testing.T) {
 }
 
 func TestTaskFromACS(t *testing.T) {
-	testTime := ttime.Now().Truncate(1 * time.Second).Format(time.RFC3339)
-
 	intptr := func(i int64) *int64 {
 		return &i
 	}
@@ -1135,6 +1168,12 @@ func TestTaskFromACS(t *testing.T) {
 						Region:    strptr("us-west-2"),
 					},
 				},
+				EnvironmentFiles: []*ecsacs.EnvironmentFile{
+					{
+						Value: strptr("s3://bucketName/envFile"),
+						Type:  strptr("s3"),
+					},
+				},
 			},
 		},
 		Volumes: []*ecsacs.Volume{
@@ -1170,16 +1209,9 @@ func TestTaskFromACS(t *testing.T) {
 				Type: strptr("elastic-inference"),
 			},
 		},
-		RoleCredentials: &ecsacs.IAMRoleCredentials{
-			CredentialsId:   strptr("credsId"),
-			AccessKeyId:     strptr("keyId"),
-			Expiration:      strptr(testTime),
-			RoleArn:         strptr("roleArn"),
-			SecretAccessKey: strptr("OhhSecret"),
-			SessionToken:    strptr("sessionToken"),
-		},
-		Cpu:    floatptr(2.0),
-		Memory: intptr(512),
+		RoleCredentials: getACSIAMRoleCredentials(),
+		Cpu:             floatptr(2.0),
+		Memory:          intptr(512),
 	}
 	expectedTask := &Task{
 		Arn:                 "myArn",
@@ -1231,6 +1263,12 @@ func TestTaskFromACS(t *testing.T) {
 						ValueFrom: "/test/secret",
 						Provider:  "ssm",
 						Region:    "us-west-2",
+					},
+				},
+				EnvironmentFiles: []apicontainer.EnvironmentFile{
+					{
+						Value: "s3://bucketName/envFile",
+						Type:  "s3",
 					},
 				},
 				TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
@@ -1557,7 +1595,7 @@ func TestGetIDErrorPaths(t *testing.T) {
 		{"", "EmptyString"},
 		{"invalidArn", "InvalidARN"},
 		{"arn:aws:ecs:region:account-id:task:task-id", "IncorrectSections"},
-		{"arn:aws:ecs:region:account-id:task", "IncorrectResouceSections"},
+		{"arn:aws:ecs:region:account-id:task", "IncorrectResourceSections"},
 	}
 
 	task := Task{}
@@ -1574,12 +1612,21 @@ func TestGetIDErrorPaths(t *testing.T) {
 
 // TestGetIDHappyPath validates the happy path of GetID
 func TestGetIDHappyPath(t *testing.T) {
-	task := Task{
+	taskNormalARN := Task{
 		Arn: "arn:aws:ecs:region:account-id:task/task-id",
 	}
-	taskID, err := task.GetID()
+	taskLongARN := Task{
+		Arn: "arn:aws:ecs:region:account-id:task/cluster-name/task-id",
+	}
+
+	taskID, err := taskNormalARN.GetID()
 	assert.NoError(t, err)
 	assert.Equal(t, "task-id", taskID)
+
+	taskID, err = taskLongARN.GetID()
+	assert.NoError(t, err)
+	assert.Equal(t, "task-id", taskID)
+
 }
 
 // TestTaskGetPrimaryENI tests the eni can be correctly acquired by calling GetTaskPrimaryENI
@@ -1710,13 +1757,14 @@ func TestApplyExecutionRoleLogsAuthSet(t *testing.T) {
 	credentialsManager.EXPECT().GetTaskCredentials(credentialsIDInTask).Return(taskCredentials, true)
 	task.initializeCredentialsEndpoint(credentialsManager)
 
-	config, err := task.DockerHostConfig(task.Containers[0], dockerMap(task), defaultDockerClientAPIVersion)
+	cfg, err := task.DockerHostConfig(task.Containers[0], dockerMap(task), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
 
-	err = task.ApplyExecutionRoleLogsAuth(config, credentialsManager)
+	err = task.ApplyExecutionRoleLogsAuth(cfg, credentialsManager)
 	assert.Nil(t, err)
 
-	endpoint, ok := config.LogConfig.Config["awslogs-credentials-endpoint"]
+	endpoint, ok := cfg.LogConfig.Config["awslogs-credentials-endpoint"]
 	assert.True(t, ok)
 	assert.Equal(t, expectedEndpoint, endpoint)
 }
@@ -1759,13 +1807,14 @@ func TestApplyExecutionRoleLogsAuthNoConfigInHostConfig(t *testing.T) {
 	credentialsManager.EXPECT().GetTaskCredentials(credentialsIDInTask).Return(taskCredentials, true)
 	task.initializeCredentialsEndpoint(credentialsManager)
 
-	config, err := task.DockerHostConfig(task.Containers[0], dockerMap(task), defaultDockerClientAPIVersion)
+	cfg, err := task.DockerHostConfig(task.Containers[0], dockerMap(task), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
 
-	err = task.ApplyExecutionRoleLogsAuth(config, credentialsManager)
+	err = task.ApplyExecutionRoleLogsAuth(cfg, credentialsManager)
 	assert.Nil(t, err)
 
-	endpoint, ok := config.LogConfig.Config["awslogs-credentials-endpoint"]
+	endpoint, ok := cfg.LogConfig.Config["awslogs-credentials-endpoint"]
 	assert.True(t, ok)
 	assert.Equal(t, expectedEndpoint, endpoint)
 }
@@ -1801,10 +1850,11 @@ func TestApplyExecutionRoleLogsAuthFailEmptyCredentialsID(t *testing.T) {
 
 	task.initializeCredentialsEndpoint(credentialsManager)
 
-	config, err := task.DockerHostConfig(task.Containers[0], dockerMap(task), defaultDockerClientAPIVersion)
+	cfg, err := task.DockerHostConfig(task.Containers[0], dockerMap(task), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
 
-	err = task.ApplyExecutionRoleLogsAuth(config, credentialsManager)
+	err = task.ApplyExecutionRoleLogsAuth(cfg, credentialsManager)
 	assert.Error(t, err)
 }
 
@@ -1843,10 +1893,10 @@ func TestApplyExecutionRoleLogsAuthFailNoCredentialsForTask(t *testing.T) {
 	credentialsManager.EXPECT().GetTaskCredentials(credentialsIDInTask).Return(credentials.TaskIAMRoleCredentials{}, false)
 	task.initializeCredentialsEndpoint(credentialsManager)
 
-	config, err := task.DockerHostConfig(task.Containers[0], dockerMap(task), defaultDockerClientAPIVersion)
+	cfg, err := task.DockerHostConfig(task.Containers[0], dockerMap(task), defaultDockerClientAPIVersion, &config.Config{})
 	assert.Error(t, err)
 
-	err = task.ApplyExecutionRoleLogsAuth(config, credentialsManager)
+	err = task.ApplyExecutionRoleLogsAuth(cfg, credentialsManager)
 	assert.Error(t, err)
 }
 
@@ -1861,12 +1911,14 @@ func TestSetMinimumMemoryLimit(t *testing.T) {
 		},
 	}
 
-	hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Nil(t, err)
 
 	assert.Equal(t, int64(apicontainer.DockerContainerMinimumMemoryInBytes), hostconfig.Memory)
 
-	hostconfig, err = testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), dockerclient.Version_1_18)
+	hostconfig, err = testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), dockerclient.Version_1_18,
+		&config.Config{})
 	assert.Nil(t, err)
 
 	assert.Equal(t, int64(apicontainer.DockerContainerMinimumMemoryInBytes), hostconfig.Memory)
@@ -2209,7 +2261,7 @@ func TestPostUnmarshalTaskASMDockerAuth(t *testing.T) {
 	}
 
 	task := &Task{
-		Arn:                "test",
+		Arn:                testTaskARN,
 		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
 		Containers:         []*apicontainer.Container{container},
 	}
@@ -2248,7 +2300,7 @@ func TestPostUnmarshalTaskSecret(t *testing.T) {
 	}
 
 	task := &Task{
-		Arn:                "test",
+		Arn:                testTaskARN,
 		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
 		Containers:         []*apicontainer.Container{container},
 	}
@@ -2287,7 +2339,7 @@ func TestPostUnmarshalTaskASMSecret(t *testing.T) {
 	}
 
 	task := &Task{
-		Arn:                "test",
+		Arn:                testTaskARN,
 		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
 		Containers:         []*apicontainer.Container{container},
 	}
@@ -2923,7 +2975,8 @@ func TestDockerHostConfigNvidiaRuntime(t *testing.T) {
 
 	cfg := &config.Config{GPUSupportEnabled: true, NvidiaRuntime: config.DefaultNvidiaRuntime}
 	testTask.addGPUResource(cfg)
-	dockerHostConfig, _ := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	dockerHostConfig, _ := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Equal(t, testTask.NvidiaRuntime, dockerHostConfig.Runtime)
 }
 
@@ -2940,7 +2993,8 @@ func TestDockerHostConfigRuntimeWithoutGPU(t *testing.T) {
 
 	cfg := &config.Config{GPUSupportEnabled: true}
 	testTask.addGPUResource(cfg)
-	dockerHostConfig, _ := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	dockerHostConfig, _ := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Equal(t, "", dockerHostConfig.Runtime)
 }
 
@@ -2971,8 +3025,28 @@ func TestDockerHostConfigNoNvidiaRuntime(t *testing.T) {
 
 	cfg := &config.Config{GPUSupportEnabled: true}
 	testTask.addGPUResource(cfg)
-	_, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	_, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{})
 	assert.Error(t, err)
+}
+
+func TestDockerHostConfigNeuronRuntime(t *testing.T) {
+	testTask := &Task{
+		Arn: "test",
+		Containers: []*apicontainer.Container{
+			{
+				Name:  "myName1",
+				Image: "image:tag",
+				Environment: map[string]string{
+					"AWS_NEURON_VISIBLE_DEVICES": "all",
+				},
+			},
+		},
+	}
+
+	dockerHostConfig, _ := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion,
+		&config.Config{InferentiaSupportEnabled: true})
+	assert.Equal(t, neuronRuntime, dockerHostConfig.Runtime)
 }
 
 func TestAssociationsByTypeAndContainer(t *testing.T) {
@@ -3306,4 +3380,132 @@ func TestBuildCNIConfigTrunkBranchENI(t *testing.T) {
 			assert.Equal(t, "ecs-bridge", bridgeConfig.BridgeName)
 		})
 	}
+}
+
+func TestPostUnmarshalTaskEnvfiles(t *testing.T) {
+	envfile := apicontainer.EnvironmentFile{
+		Value: "s3://bucket/envfile",
+		Type:  "s3",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "containerName",
+		Image:                     "image:tag",
+		EnvironmentFiles:          []apicontainer.EnvironmentFile{envfile},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                testTaskARN,
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cfg := &config.Config{}
+	credentialsManager := mock_credentials.NewMockManager(ctrl)
+	resFields := &taskresource.ResourceFields{
+		ResourceFieldsCommon: &taskresource.ResourceFieldsCommon{
+			CredentialsManager: credentialsManager,
+		},
+	}
+
+	resourceDep := apicontainer.ResourceDependency{
+		Name:           envFiles.ResourceName,
+		RequiredStatus: resourcestatus.ResourceStatus(envFiles.EnvFileCreated),
+	}
+
+	err := task.PostUnmarshalTask(cfg, credentialsManager, resFields, nil, nil)
+	assert.NoError(t, err)
+
+	assert.Equal(t, 1, len(task.ResourcesMapUnsafe))
+	assert.Equal(t, resourceDep,
+		task.Containers[0].TransitionDependenciesMap[apicontainerstatus.ContainerCreated].ResourceDependencies[0])
+}
+
+func TestInitializeAndGetEnvfilesResource(t *testing.T) {
+	envfile := apicontainer.EnvironmentFile{
+		Value: "s3://bucket/envfile",
+		Type:  "s3",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "containerName",
+		Image:                     "image:tag",
+		EnvironmentFiles:          []apicontainer.EnvironmentFile{envfile},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "testArn",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container},
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cfg := &config.Config{
+		DataDir: "/ecs/data",
+	}
+	credentialsManager := mock_credentials.NewMockManager(ctrl)
+
+	task.initializeEnvfilesResource(cfg, credentialsManager)
+
+	resourceDep := apicontainer.ResourceDependency{
+		Name:           envFiles.ResourceName,
+		RequiredStatus: resourcestatus.ResourceStatus(envFiles.EnvFileCreated),
+	}
+
+	assert.Equal(t, resourceDep,
+		task.Containers[0].TransitionDependenciesMap[apicontainerstatus.ContainerCreated].ResourceDependencies[0])
+
+	_, ok := task.getEnvfilesResource("containerName")
+	assert.True(t, ok)
+}
+
+func TestRequiresEnvfiles(t *testing.T) {
+	envfile := apicontainer.EnvironmentFile{
+		Value: "s3://bucket/envfile",
+		Type:  "s3",
+	}
+
+	container := &apicontainer.Container{
+		Name:                      "containerName",
+		Image:                     "image:tag",
+		EnvironmentFiles:          []apicontainer.EnvironmentFile{envfile},
+		TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
+	}
+
+	task := &Task{
+		Arn:                "testArn",
+		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
+		Containers:         []*apicontainer.Container{container},
+	}
+
+	assert.Equal(t, true, requireEnvfiles(task))
+}
+
+func requireEnvfiles(task *Task) bool {
+	for _, container := range task.Containers {
+		if container.ShouldCreateWithEnvFiles() {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPopulateTaskARN(t *testing.T) {
+	task := &Task{
+		Arn: testTaskARN,
+		Containers: []*apicontainer.Container{
+			{
+				Name: "test",
+			},
+		},
+	}
+	task.populateTaskARN()
+	assert.Equal(t, task.Arn, task.Containers[0].GetTaskARN())
 }

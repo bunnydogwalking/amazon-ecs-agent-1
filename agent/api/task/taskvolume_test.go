@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -67,7 +67,20 @@ func TestMarshalTaskVolumesEFS(t *testing.T) {
 	task := &Task{
 		Arn: "test",
 		Volumes: []TaskVolume{
-			{Name: "1", Type: EFSVolumeType, Volume: &taskresourcevolume.EFSVolumeConfig{FileSystemID: "fs-12345", RootDirectory: "/tmp"}},
+			{
+				Name: "1",
+				Type: EFSVolumeType,
+				Volume: &taskresourcevolume.EFSVolumeConfig{
+					AuthConfig: taskresourcevolume.EFSAuthConfig{
+						AccessPointId: "fsap-123",
+						Iam:           "ENABLED",
+					},
+					FileSystemID:          "fs-12345",
+					RootDirectory:         "/tmp",
+					TransitEncryption:     "ENABLED",
+					TransitEncryptionPort: 23456,
+				},
+			},
 		},
 	}
 
@@ -83,9 +96,15 @@ func TestMarshalTaskVolumesEFS(t *testing.T) {
 		"volumes": [
 		  {
 			"efsVolumeConfiguration": {
-			  "fileSystemId": "fs-12345",
-			  "rootDirectory": "/tmp",
-			  "dockerVolumeName": ""
+				"authorizationConfig": {
+					"accessPointId": "fsap-123",
+					"iam": "ENABLED"
+				},
+				"fileSystemId": "fs-12345",
+				"rootDirectory": "/tmp",
+				"transitEncryption": "ENABLED",
+				"transitEncryptionPort": 23456,
+			 	"dockerVolumeName": ""
 			},
 			"name": "1",
 			"type": "efs"
@@ -108,7 +127,7 @@ func TestMarshalTaskVolumesEFS(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		// windows task defs have a special 'cpu/memory unbounded' field added.
 		// see https://github.com/aws/amazon-ecs-agent/pull/1227
-		expectedTaskDef = fmt.Sprintf(expectedTaskDef, `{"cpuUnbounded": false, "memoryUnbounded": false}`)
+		expectedTaskDef = fmt.Sprintf(expectedTaskDef, `{"cpuUnbounded": null, "memoryUnbounded": null}`)
 	} else {
 		expectedTaskDef = fmt.Sprintf(expectedTaskDef, "{}")
 	}
@@ -126,9 +145,15 @@ func TestUnmarshalTaskVolumesEFS(t *testing.T) {
 		"volumes": [
 		  {
 			"efsVolumeConfiguration": {
-			  "fileSystemId": "fs-12345",
-			  "rootDirectory": "/tmp",
-			  "dockerVolumeName": ""
+			  "authorizationConfig": {
+					"accessPointId": "fsap-123",
+					"iam": "ENABLED"
+				},
+				"fileSystemId": "fs-12345",
+				"rootDirectory": "/tmp",
+				"transitEncryption": "ENABLED",
+				"transitEncryptionPort": 23456,
+				"dockerVolumeName": ""
 			},
 			"name": "1",
 			"type": "efs"
@@ -153,12 +178,16 @@ func TestUnmarshalTaskVolumesEFS(t *testing.T) {
 	require.NoError(t, err, "Could not unmarshal task")
 
 	require.Len(t, task.Volumes, 1)
-	require.Equal(t, "efs", task.Volumes[0].Type)
-	require.Equal(t, "1", task.Volumes[0].Name)
+	assert.Equal(t, "efs", task.Volumes[0].Type)
+	assert.Equal(t, "1", task.Volumes[0].Name)
 	efsConfig, ok := task.Volumes[0].Volume.(*taskresourcevolume.EFSVolumeConfig)
 	require.True(t, ok)
-	require.Equal(t, "fs-12345", efsConfig.FileSystemID)
-	require.Equal(t, "/tmp", efsConfig.RootDirectory)
+	assert.Equal(t, "fsap-123", efsConfig.AuthConfig.AccessPointId)
+	assert.Equal(t, "ENABLED", efsConfig.AuthConfig.Iam)
+	assert.Equal(t, "fs-12345", efsConfig.FileSystemID)
+	assert.Equal(t, "/tmp", efsConfig.RootDirectory)
+	assert.Equal(t, "ENABLED", efsConfig.TransitEncryption)
+	assert.Equal(t, int64(23456), efsConfig.TransitEncryptionPort)
 }
 
 func TestMarshalUnmarshalTaskVolumes(t *testing.T) {
@@ -243,7 +272,7 @@ func TestInitializeLocalDockerVolume(t *testing.T) {
 }
 
 func TestInitializeSharedProvisionedVolume(t *testing.T) {
-	sharedVolumeMatchFullConfig := true
+	sharedVolumeMatchFullConfig := config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
@@ -275,42 +304,19 @@ func TestInitializeSharedProvisionedVolume(t *testing.T) {
 
 	// Expect the volume already exists on the instance
 	dockerClient.EXPECT().InspectVolume(gomock.Any(), gomock.Any(), gomock.Any()).Return(dockerapi.SDKVolumeResponse{})
-	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig, dockerClient, nil)
+	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig.Enabled(), dockerClient, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, testTask.ResourcesMapUnsafe, 0, "no volume resource should be provisioned by agent")
 	assert.Len(t, testTask.Containers[0].TransitionDependenciesMap, 0, "resource already exists")
 }
 
-func TestInitializeEFSVolume(t *testing.T) {
+func TestInitializeEFSVolume_UseLocalVolumeDriver(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
 
-	testTask := &Task{
-		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
-		Containers: []*apicontainer.Container{
-			{
-				MountPoints: []apicontainer.MountPoint{
-					{
-						SourceVolume:  "efs-volume-test",
-						ContainerPath: "/ecs",
-					},
-				},
-				TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
-			},
-		},
-		Volumes: []TaskVolume{
-			{
-				Name: "efs-volume-test",
-				Type: "efs",
-				Volume: &taskresourcevolume.EFSVolumeConfig{
-					FileSystemID:  "fs-12345",
-					RootDirectory: "/my/root/dir",
-				},
-			},
-		},
-	}
+	testTask := getEFSTask()
 
 	cfg := &config.Config{
 		AWSRegion: "us-west-1",
@@ -322,8 +328,33 @@ func TestInitializeEFSVolume(t *testing.T) {
 
 	dockervol, ok := testTask.Volumes[0].Volume.(*taskresourcevolume.DockerVolumeConfig)
 	assert.True(t, ok)
+	assert.Equal(t, "local", dockervol.Driver)
+	assert.Equal(t, "nfs", dockervol.DriverOpts["type"])
 	assert.Equal(t, "addr=fs-12345.efs.us-west-1.amazonaws.com,nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport", dockervol.DriverOpts["o"])
 	assert.Equal(t, ":/my/root/dir", dockervol.DriverOpts["device"])
+}
+
+func TestInitializeEFSVolume_UseECSVolumePlugin(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
+
+	testTask := getEFSTask()
+	testTask.credentialsRelativeURIUnsafe = "/v2/creds-id"
+
+	cfg := &config.Config{
+		VolumePluginCapabilities: []string{"efsAuth"},
+	}
+	err := testTask.initializeEFSVolumes(cfg, dockerClient, nil)
+
+	require.NoError(t, err)
+	assert.Len(t, testTask.Volumes, 1)
+
+	dockervol, ok := testTask.Volumes[0].Volume.(*taskresourcevolume.DockerVolumeConfig)
+	require.True(t, ok)
+	assert.Equal(t, "efs", dockervol.DriverOpts["type"])
+	assert.Equal(t, "tls,tlsport=12345,iam,awscredsuri=/v2/creds-id,accesspoint=fsap-123", dockervol.DriverOpts["o"])
+	assert.Equal(t, "fs-12345:/my/root/dir", dockervol.DriverOpts["device"])
 }
 
 func TestInitializeEFSVolume_WrongVolumeConfig(t *testing.T) {
@@ -331,27 +362,8 @@ func TestInitializeEFSVolume_WrongVolumeConfig(t *testing.T) {
 	defer ctrl.Finish()
 	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
 
-	testTask := &Task{
-		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
-		Containers: []*apicontainer.Container{
-			{
-				MountPoints: []apicontainer.MountPoint{
-					{
-						SourceVolume:  "efs-volume-test",
-						ContainerPath: "/ecs",
-					},
-				},
-				TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
-			},
-		},
-		Volumes: []TaskVolume{
-			{
-				Name:   "efs-volume-test",
-				Type:   "efs",
-				Volume: &taskresourcevolume.DockerVolumeConfig{},
-			},
-		},
-	}
+	testTask := getEFSTask()
+	testTask.Volumes[0].Volume = &taskresourcevolume.DockerVolumeConfig{}
 
 	cfg := &config.Config{
 		AWSRegion: "us-west-1",
@@ -366,30 +378,8 @@ func TestInitializeEFSVolume_WrongVolumeType(t *testing.T) {
 	defer ctrl.Finish()
 	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
 
-	testTask := &Task{
-		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
-		Containers: []*apicontainer.Container{
-			{
-				MountPoints: []apicontainer.MountPoint{
-					{
-						SourceVolume:  "efs-volume-test",
-						ContainerPath: "/ecs",
-					},
-				},
-				TransitionDependenciesMap: make(map[apicontainerstatus.ContainerStatus]apicontainer.TransitionDependencySet),
-			},
-		},
-		Volumes: []TaskVolume{
-			{
-				Name: "efs-volume-test",
-				Type: "docker",
-				Volume: &taskresourcevolume.EFSVolumeConfig{
-					FileSystemID:  "fs-12345",
-					RootDirectory: "/my/root/dir",
-				},
-			},
-		},
-	}
+	testTask := getEFSTask()
+	testTask.Volumes[0].Type = "docker"
 
 	cfg := &config.Config{
 		AWSRegion: "us-west-1",
@@ -402,7 +392,7 @@ func TestInitializeEFSVolume_WrongVolumeType(t *testing.T) {
 }
 
 func TestInitializeSharedProvisionedVolumeError(t *testing.T) {
-	sharedVolumeMatchFullConfig := true
+	sharedVolumeMatchFullConfig := config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
@@ -434,12 +424,12 @@ func TestInitializeSharedProvisionedVolumeError(t *testing.T) {
 
 	// Expect the volume does not exists on the instance
 	dockerClient.EXPECT().InspectVolume(gomock.Any(), gomock.Any(), gomock.Any()).Return(dockerapi.SDKVolumeResponse{Error: errors.New("volume not exist")})
-	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig, dockerClient, nil)
+	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig.Enabled(), dockerClient, nil)
 	assert.Error(t, err, "volume not found for auto-provisioned resource should cause task to fail")
 }
 
 func TestInitializeSharedNonProvisionedVolume(t *testing.T) {
-	sharedVolumeMatchFullConfig := true
+	sharedVolumeMatchFullConfig := config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
@@ -476,7 +466,7 @@ func TestInitializeSharedNonProvisionedVolume(t *testing.T) {
 			Labels: map[string]string{"test": "test"},
 		},
 	})
-	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig, dockerClient, nil)
+	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig.Enabled(), dockerClient, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, testTask.ResourcesMapUnsafe, 0, "no volume resource should be provisioned by agent")
@@ -484,7 +474,7 @@ func TestInitializeSharedNonProvisionedVolume(t *testing.T) {
 }
 
 func TestInitializeSharedNonProvisionedVolumeValidateNameOnly(t *testing.T) {
-	sharedVolumeMatchFullConfig := false
+	sharedVolumeMatchFullConfig := config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled}
 
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -524,7 +514,7 @@ func TestInitializeSharedNonProvisionedVolumeValidateNameOnly(t *testing.T) {
 			Labels:  nil,
 		},
 	})
-	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig, dockerClient, nil)
+	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig.Enabled(), dockerClient, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, testTask.ResourcesMapUnsafe, 0, "no volume resource should be provisioned by agent")
@@ -532,7 +522,7 @@ func TestInitializeSharedNonProvisionedVolumeValidateNameOnly(t *testing.T) {
 }
 
 func TestInitializeSharedAutoprovisionVolumeNotFoundError(t *testing.T) {
-	sharedVolumeMatchFullConfig := true
+	sharedVolumeMatchFullConfig := config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
@@ -563,14 +553,14 @@ func TestInitializeSharedAutoprovisionVolumeNotFoundError(t *testing.T) {
 	}
 
 	dockerClient.EXPECT().InspectVolume(gomock.Any(), gomock.Any(), gomock.Any()).Return(dockerapi.SDKVolumeResponse{Error: errors.New("not found")})
-	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig, dockerClient, nil)
+	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig.Enabled(), dockerClient, nil)
 	assert.NoError(t, err)
 	assert.Len(t, testTask.ResourcesMapUnsafe, 1, "volume resource should be provisioned by agent")
 	assert.Len(t, testTask.Containers[0].TransitionDependenciesMap, 1, "volume resource should be in the container dependency map")
 }
 
 func TestInitializeSharedAutoprovisionVolumeNotMatchError(t *testing.T) {
-	sharedVolumeMatchFullConfig := true
+	sharedVolumeMatchFullConfig := config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
@@ -605,12 +595,12 @@ func TestInitializeSharedAutoprovisionVolumeNotMatchError(t *testing.T) {
 			Labels: map[string]string{"test": "test"},
 		},
 	})
-	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig, dockerClient, nil)
+	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig.Enabled(), dockerClient, nil)
 	assert.Error(t, err, "volume resource details not match should cause task fail")
 }
 
 func TestInitializeSharedAutoprovisionVolumeTimeout(t *testing.T) {
-	sharedVolumeMatchFullConfig := true
+	sharedVolumeMatchFullConfig := config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
@@ -643,12 +633,12 @@ func TestInitializeSharedAutoprovisionVolumeTimeout(t *testing.T) {
 	dockerClient.EXPECT().InspectVolume(gomock.Any(), gomock.Any(), gomock.Any()).Return(dockerapi.SDKVolumeResponse{
 		Error: &dockerapi.DockerTimeoutError{},
 	})
-	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig, dockerClient, nil)
+	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig.Enabled(), dockerClient, nil)
 	assert.Error(t, err, "volume resource details not match should cause task fail")
 }
 
 func TestInitializeTaskVolume(t *testing.T) {
-	sharedVolumeMatchFullConfig := true
+	sharedVolumeMatchFullConfig := config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	testTask := &Task{
 		ResourcesMapUnsafe: make(map[string][]taskresource.TaskResource),
 		Containers: []*apicontainer.Container{
@@ -673,8 +663,24 @@ func TestInitializeTaskVolume(t *testing.T) {
 		},
 	}
 
-	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig, nil, nil)
+	err := testTask.initializeDockerVolumes(sharedVolumeMatchFullConfig.Enabled(), nil, nil)
 	assert.NoError(t, err)
 	assert.Len(t, testTask.ResourcesMapUnsafe, 1, "expect the resource map has an empty volume resource")
 	assert.Len(t, testTask.Containers[0].TransitionDependenciesMap, 1, "expect a volume resource as the container dependency")
+}
+
+func TestGetEFSVolumeDriverName(t *testing.T) {
+	cfg := &config.Config{
+		VolumePluginCapabilities: []string{"efsAuth"},
+	}
+	assert.Equal(t, "amazon-ecs-volume-plugin", getEFSVolumeDriverName(cfg))
+	assert.Equal(t, "local", getEFSVolumeDriverName(&config.Config{}))
+}
+
+func TestSetPausePIDInVolumeResources(t *testing.T) {
+	task := getEFSTask()
+	volRes := &taskresourcevolume.VolumeResource{}
+	task.AddResource("dockerVolume", volRes)
+	task.SetPausePIDInVolumeResources("pid")
+	assert.Equal(t, "pid", volRes.GetPauseContainerPID())
 }

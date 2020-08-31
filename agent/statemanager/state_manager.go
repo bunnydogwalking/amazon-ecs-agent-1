@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -98,8 +98,12 @@ const (
 	//     firelens task resource.
 	// 25) Add `seqNumTaskManifest` int field
 	// 26) Add 'credentialspec' field to 'resources'
+	// 27)
+	//	 a) Add 'authorizationConfig', 'transitEncryption' and 'transitEncryptionPort' to 'taskresource.volume.EFSVolumeConfig'
+	//	 b) Add 'pauseContainerPID' field to 'taskresource.volume.VolumeResource'
+	// 28) Add 'envfile' field to 'resources'
 
-	ECSDataVersion = 26
+	ECSDataVersion = 28
 
 	// ecsDataFile specifies the filename in the ECS_DATADIR
 	ecsDataFile = "ecs_agent_data.json"
@@ -233,7 +237,7 @@ func (manager *basicStateManager) Save() error {
 		next := manager.lastSave.Add(minSaveInterval)
 		manager.nextPlannedSave = next
 		go func() {
-			time.Sleep(next.Sub(time.Now()))
+			time.Sleep(time.Until(next))
 			manager.Save()
 		}()
 	}

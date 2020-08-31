@@ -1,4 +1,4 @@
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -90,6 +90,7 @@ type AttachmentStateChange struct {
 }
 
 // NewTaskStateChangeEvent creates a new task state change event
+// returns error if the state change doesn't need to be sent to the ECS backend.
 func NewTaskStateChangeEvent(task *apitask.Task, reason string) (TaskStateChange, error) {
 	var event TaskStateChange
 	taskKnownStatus := task.GetKnownStatus()
@@ -117,6 +118,7 @@ func NewTaskStateChangeEvent(task *apitask.Task, reason string) (TaskStateChange
 }
 
 // NewContainerStateChangeEvent creates a new container state change event
+// returns error if the state change doesn't need to be sent to the ECS backend.
 func NewContainerStateChangeEvent(task *apitask.Task, cont *apicontainer.Container, reason string) (ContainerStateChange, error) {
 	var event ContainerStateChange
 	contKnownStatus := cont.GetKnownStatus()

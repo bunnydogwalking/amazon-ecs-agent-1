@@ -1,6 +1,6 @@
 //+build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -21,8 +21,8 @@ import (
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
-	"github.com/aws/aws-sdk-go/aws"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -36,32 +36,33 @@ const (
 	predictableInt64Overflow = math.MaxInt64 / int64(2)
 )
 
+var now time.Time = time.Now()
+
 func getTimestamps() []time.Time {
 	return []time.Time{
-		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
-		parseNanoTime("2015-02-12T21:22:05.232291187Z"),
-		parseNanoTime("2015-02-12T21:22:05.333776335Z"),
-		parseNanoTime("2015-02-12T21:22:05.434753595Z"),
-		parseNanoTime("2015-02-12T21:22:05.535746779Z"),
-		parseNanoTime("2015-02-12T21:22:05.638709495Z"),
-		parseNanoTime("2015-02-12T21:22:05.739985398Z"),
-		parseNanoTime("2015-02-12T21:22:05.840941705Z"),
-		parseNanoTime("2015-02-12T21:22:05.94164351Z"),
-		parseNanoTime("2015-02-12T21:22:06.042625519Z"),
-		parseNanoTime("2015-02-12T21:22:06.143665077Z"),
-		parseNanoTime("2015-02-12T21:22:06.244769169Z"),
-		parseNanoTime("2015-02-12T21:22:06.345847001Z"),
-		parseNanoTime("2015-02-12T21:22:06.447151399Z"),
-		parseNanoTime("2015-02-12T21:22:06.548213586Z"),
-		parseNanoTime("2015-02-12T21:22:06.650013301Z"),
-		parseNanoTime("2015-02-12T21:22:06.751120187Z"),
-		parseNanoTime("2015-02-12T21:22:06.852163377Z"),
-		parseNanoTime("2015-02-12T21:22:06.952980001Z"),
-		parseNanoTime("2015-02-12T21:22:07.054047217Z"),
-		parseNanoTime("2015-02-12T21:22:07.154840095Z"),
-		parseNanoTime("2015-02-12T21:22:07.256075769Z"),
+		now.Add(-time.Millisecond * 2100),
+		now.Add(-time.Millisecond * 2000),
+		now.Add(-time.Millisecond * 1900),
+		now.Add(-time.Millisecond * 1800),
+		now.Add(-time.Millisecond * 1700),
+		now.Add(-time.Millisecond * 1600),
+		now.Add(-time.Millisecond * 1500),
+		now.Add(-time.Millisecond * 1400),
+		now.Add(-time.Millisecond * 1300),
+		now.Add(-time.Millisecond * 1200),
+		now.Add(-time.Millisecond * 1100),
+		now.Add(-time.Millisecond * 1000),
+		now.Add(-time.Millisecond * 900),
+		now.Add(-time.Millisecond * 800),
+		now.Add(-time.Millisecond * 700),
+		now.Add(-time.Millisecond * 600),
+		now.Add(-time.Millisecond * 500),
+		now.Add(-time.Millisecond * 400),
+		now.Add(-time.Millisecond * 300),
+		now.Add(-time.Millisecond * 200),
+		now.Add(-time.Millisecond * 100),
+		now,
 	}
-
 }
 
 func getUintStats() []uint64 {
@@ -134,7 +135,7 @@ func getLargeInt64Stats(size int) []uint64 {
 	return uintStats
 }
 
-func createQueue(size int, predictableHighUtilization bool) *Queue {
+func getContainerStats(predictableHighUtilization bool) []*ContainerStats {
 	timestamps := getTimestamps()
 	cpuTimes := getUintStats()
 	var memoryUtilizationInBytes []uint64
@@ -146,9 +147,9 @@ func createQueue(size int, predictableHighUtilization bool) *Queue {
 		memoryUtilizationInBytes = getRandomMemoryUtilizationInBytes()
 		uintStats = getUintStats()
 	}
-	queue := NewQueue(size)
+	stats := []*ContainerStats{}
 	for i, time := range timestamps {
-		queue.add(&ContainerStats{
+		stats = append(stats, &ContainerStats{
 			cpuUsage:          cpuTimes[i],
 			memoryUsage:       memoryUtilizationInBytes[i],
 			storageReadBytes:  uintStats[i],
@@ -165,7 +166,65 @@ func createQueue(size int, predictableHighUtilization bool) *Queue {
 			},
 			timestamp: time})
 	}
+	return stats
+}
+
+func createQueue(size int, predictableHighUtilization bool) *Queue {
+	stats := getContainerStats(predictableHighUtilization)
+	queue := NewQueue(size)
+	for _, stat := range stats {
+		queue.add(stat)
+	}
 	return queue
+}
+
+func TestQueueReset(t *testing.T) {
+	queue := NewQueue(10)
+	// empty queue should throw errors getting stats sets:
+	_, err := queue.GetCPUStatsSet()
+	require.Error(t, err)
+	_, err = queue.GetMemoryStatsSet()
+	require.Error(t, err)
+	_, err = queue.GetStorageStatsSet()
+	require.Error(t, err)
+	_, err = queue.GetNetworkStatsSet()
+	require.Error(t, err)
+
+	// add some metrics, and getting stats sets should now succeed:
+	stats := getContainerStats(false)
+	for i := 0; i < 4; i++ {
+		queue.add(stats[i])
+	}
+	_, err = queue.GetCPUStatsSet()
+	require.NoError(t, err)
+	_, err = queue.GetMemoryStatsSet()
+	require.NoError(t, err)
+	_, err = queue.GetStorageStatsSet()
+	require.NoError(t, err)
+	_, err = queue.GetNetworkStatsSet()
+	require.NoError(t, err)
+
+	// after resetting the queue, there are no metrics to send and getting stats sets should error again:
+	queue.Reset()
+	_, err = queue.GetCPUStatsSet()
+	require.Error(t, err)
+	_, err = queue.GetMemoryStatsSet()
+	require.Error(t, err)
+	_, err = queue.GetStorageStatsSet()
+	require.Error(t, err)
+	_, err = queue.GetNetworkStatsSet()
+	require.Error(t, err)
+
+	// add single stat to queue and getting stats sets should succeed again:
+	queue.add(stats[4])
+	_, err = queue.GetCPUStatsSet()
+	require.NoError(t, err)
+	_, err = queue.GetMemoryStatsSet()
+	require.NoError(t, err)
+	_, err = queue.GetStorageStatsSet()
+	require.NoError(t, err)
+	_, err = queue.GetNetworkStatsSet()
+	require.NoError(t, err)
 }
 
 func TestQueueAddRemove(t *testing.T) {
@@ -174,113 +233,52 @@ func TestQueueAddRemove(t *testing.T) {
 	// Set predictableHighUtilization to false, expect random values when aggregated.
 	queue := createQueue(queueLength, false)
 	buf := queue.buffer
-	if len(buf) != queueLength {
-		t.Error("Buffer size is incorrect. Expected: 4, Got: ", len(buf))
-	}
+	require.Len(t, buf, queueLength, "Buffer size is incorrect.")
 
 	timestampsIndex := len(timestamps) - len(buf)
 	for i, stat := range buf {
 		if stat.Timestamp != timestamps[timestampsIndex+i] {
-			t.Error("Unexpected value for Stats element in buffer")
+			t.Errorf("Unexpected value for Stats element in buffer. expected %s got %s", timestamps[timestampsIndex+i], stat.Timestamp)
 		}
 	}
 
 	cpuStatsSet, err := queue.GetCPUStatsSet()
-	if err != nil {
-		t.Error("Error getting cpu stats set:", err)
-	}
-	if *cpuStatsSet.Min == math.MaxFloat64 || math.IsNaN(*cpuStatsSet.Min) {
-		t.Error("Min value incorrectly set: ", *cpuStatsSet.Min)
-	}
-	if *cpuStatsSet.Max == -math.MaxFloat64 || math.IsNaN(*cpuStatsSet.Max) {
-		t.Error("Max value incorrectly set: ", *cpuStatsSet.Max)
-	}
-	if *cpuStatsSet.SampleCount != int64(queueLength) {
-		t.Error("Expected samplecount: ", queueLength, " got: ", *cpuStatsSet.SampleCount)
-	}
-	if *cpuStatsSet.Sum == 0 {
-		t.Error("Sum value incorrectly set: ", *cpuStatsSet.Sum)
-	}
+	require.NoError(t, err)
+	require.NotEqual(t, math.MaxFloat64, *cpuStatsSet.Min)
+	require.NotEqual(t, math.NaN(), *cpuStatsSet.Min)
+	require.NotEqual(t, -math.MaxFloat64, *cpuStatsSet.Max)
+	require.NotEqual(t, math.NaN(), *cpuStatsSet.Max)
+	require.Equal(t, int64(queueLength), *cpuStatsSet.SampleCount)
+	require.Equal(t, int(554), int(*cpuStatsSet.Sum))
 
 	memStatsSet, err := queue.GetMemoryStatsSet()
-	if err != nil {
-		t.Error("Error getting memory stats set:", err)
-	}
-	if *memStatsSet.Min == math.MaxFloat64 || math.IsNaN(*memStatsSet.Min) {
-		t.Error("Min value incorrectly set: ", *memStatsSet.Min)
-	}
-	if *memStatsSet.Max == -math.MaxFloat64 || math.IsNaN(*memStatsSet.Max) {
-		t.Error("Max value incorrectly set: ", *memStatsSet.Max)
-	}
-	if *memStatsSet.SampleCount != int64(queueLength) {
-		t.Error("Expected samplecount: ", queueLength, " got: ", *memStatsSet.SampleCount)
-	}
-	if *memStatsSet.Sum == 0 {
-		t.Error("Sum value incorrectly set: ", *memStatsSet.Sum)
-	}
+	require.NoError(t, err)
+	require.NotEqual(t, math.MaxFloat64, *memStatsSet.Min)
+	require.NotEqual(t, math.NaN(), *memStatsSet.Min)
+	require.NotEqual(t, -math.MaxFloat64, *memStatsSet.Max)
+	require.NotEqual(t, math.NaN(), *memStatsSet.Max)
+	require.Equal(t, int64(queueLength), *memStatsSet.SampleCount)
+	require.Equal(t, int(12), int(*memStatsSet.Sum))
 
 	storageStatsSet, err := queue.GetStorageStatsSet()
-	if err != nil {
-		t.Error("Error getting storage stats set:", err)
-	}
+	require.NoError(t, err)
 	// assuming min is initialized to math.MaxUint64 then truncated
 	storageReadStatsSet := storageStatsSet.ReadSizeBytes
-	if *storageReadStatsSet.Min == int64(math.MaxInt64) &&
-		*storageReadStatsSet.OverflowMin == int64(math.MaxInt64) {
-		t.Error("Min value incorrectly set: ", *storageReadStatsSet.Min)
-	}
-	if *storageReadStatsSet.Max == 0 {
-		t.Error("Max value incorrectly set: ", *storageReadStatsSet.Max)
-	}
-	if *storageReadStatsSet.SampleCount != int64(queueLength) {
-		t.Error("Expected samplecount: ", queueLength, " got: ", *storageReadStatsSet.SampleCount)
-	}
-	if *storageReadStatsSet.Sum == 0 {
-		t.Error("Sum value incorrectly set: ", *storageReadStatsSet.Sum)
-	}
+	require.NotEqual(t, math.MaxInt64, *storageReadStatsSet.Min)
+	require.NotEqual(t, math.MaxInt64, *storageReadStatsSet.OverflowMin)
+	require.NotEqual(t, 0, *storageReadStatsSet.Max)
+	require.Equal(t, int64(queueLength), *storageReadStatsSet.SampleCount)
+	require.Equal(t, int64(12467777475), *storageReadStatsSet.Sum)
 
 	storageWriteStatsSet := storageStatsSet.WriteSizeBytes
-	if *storageWriteStatsSet.Min == int64(math.MaxInt64) {
-		t.Error("Min value incorrectly set: ", *storageWriteStatsSet.Min)
-	}
-	if *storageWriteStatsSet.Max == 0 {
-		t.Error("Max value incorrectly set: ", *storageWriteStatsSet.Max)
-	}
-	if *storageWriteStatsSet.SampleCount != int64(queueLength) {
-		t.Error("Expected samplecount: ", queueLength, " got: ", *storageWriteStatsSet.SampleCount)
-	}
-	if *storageWriteStatsSet.Sum == 0 {
-		t.Error("Sum value incorrectly set: ", *storageWriteStatsSet.Sum)
-	}
+	require.NotEqual(t, math.MaxInt64, *storageWriteStatsSet.Min)
+	require.NotEqual(t, 0, *storageWriteStatsSet.Max)
+	require.Equal(t, int64(queueLength), *storageWriteStatsSet.SampleCount)
+	require.Equal(t, int64(12467777475), *storageWriteStatsSet.Sum)
 
 	netStatsSet, err := queue.GetNetworkStatsSet()
-	assert.NoError(t, err, "error getting network stats set")
+	require.NoError(t, err, "error getting network stats set")
 	validateNetStatsSet(t, netStatsSet, queueLength)
-
-	rawUsageStats, err := queue.GetRawUsageStats(2 * queueLength)
-	if err != nil {
-		t.Error("Error getting raw usage stats: ", err)
-	}
-
-	if len(rawUsageStats) != queueLength {
-		t.Error("Expected to get ", queueLength, " raw usage stats. Got: ", len(rawUsageStats))
-	}
-
-	prevRawUsageStats := rawUsageStats[0]
-	for i := 1; i < queueLength; i++ {
-		curRawUsageStats := rawUsageStats[i]
-		if prevRawUsageStats.Timestamp.Before(curRawUsageStats.Timestamp) {
-			t.Error("Raw usage stats not ordered as expected, index: ", i, " prev stat: ", prevRawUsageStats.Timestamp, " current stat: ", curRawUsageStats.Timestamp)
-		}
-		prevRawUsageStats = curRawUsageStats
-	}
-
-	emptyQueue := NewQueue(queueLength)
-	rawUsageStats, err = emptyQueue.GetRawUsageStats(1)
-	if err == nil {
-		t.Error("Empty queue query did not throw an error")
-	}
-
 }
 
 func validateNetStatsSet(t *testing.T, netStats *ecstcs.NetworkStatsSet, queueLen int) {
@@ -316,6 +314,18 @@ func validateNetStatsSet(t *testing.T, netStats *ecstcs.NetworkStatsSet, queueLe
 	assert.Equal(t, int64(queueLen), *netStats.TxErrors.SampleCount, "incorrect TxErrors sampleCount")
 	assert.Equal(t, int64(0), *netStats.TxErrors.Sum, "incorrect TxErrors sum")
 	assert.Equal(t, int64(0), *netStats.TxErrors.OverflowSum, "incorrect TxErrors overlfowSum")
+
+	assert.NotNil(t, *netStats.RxBytesPerSecond, "incorrect RxBytesPerSecond set")
+	assert.Equal(t, float64(1.26999248e+08), *netStats.RxBytesPerSecond.Min, "incorrect RxBytesPerSecond min")
+	assert.Equal(t, float64(1.373376384e+09), *netStats.RxBytesPerSecond.Max, "incorrect RxBytesPerSecond max")
+	assert.Equal(t, int64(queueLen), *netStats.RxBytesPerSecond.SampleCount, "incorrect RxBytesPerSecond sampleCount")
+	assert.Equal(t, float64(5.540383824e+09), *netStats.RxBytesPerSecond.Sum, "incorrect RxBytesPerSecond sum")
+
+	assert.NotNil(t, *netStats.TxBytesPerSecond, "incorrect TxBytesPerSecond set")
+	assert.Equal(t, float64(1.26999248e+08), *netStats.TxBytesPerSecond.Min, "incorrect TxBytesPerSecond min")
+	assert.Equal(t, float64(1.373376384e+09), *netStats.TxBytesPerSecond.Max, "incorrect TxBytesPerSecond max")
+	assert.Equal(t, int64(queueLen), *netStats.TxBytesPerSecond.SampleCount, "incorrect TxBytesPerSecond sampleCount")
+	assert.Equal(t, float64(5.540383824e+09), *netStats.TxBytesPerSecond.Sum, "incorrect TxBytesPerSecond sum")
 }
 
 func TestQueueUintStats(t *testing.T) {
@@ -353,9 +363,7 @@ func TestQueueAddPredictableHighMemoryUtilization(t *testing.T) {
 	// This lets us compare the computed values against pre-computed expected values
 	queue := createQueue(queueLength, true)
 	buf := queue.buffer
-	if len(buf) != queueLength {
-		t.Error("Buffer size is incorrect. Expected: 4, Got: ", len(buf))
-	}
+	require.Len(t, buf, queueLength, "Buffer size is incorrect.")
 
 	timestampsIndex := len(timestamps) - len(buf)
 	for i, stat := range buf {
@@ -372,20 +380,11 @@ func TestQueueAddPredictableHighMemoryUtilization(t *testing.T) {
 	// Test if both min and max for memory utilization are set to 7035MiB
 	// Also test if sum  == queue length * 7035
 	expectedMemoryUsageInMiB := float64(predictableHighMemoryUtilizationInMiB)
-	if *memStatsSet.Min != expectedMemoryUsageInMiB {
-		t.Errorf("Min value incorrectly set: %.0f, expected: %.0f", *memStatsSet.Min, expectedMemoryUsageInMiB)
-	}
-	if *memStatsSet.Max != expectedMemoryUsageInMiB {
-		t.Errorf("Max value incorrectly set: %.0f, expected: %.0f", *memStatsSet.Max, expectedMemoryUsageInMiB)
-	}
-	if *memStatsSet.SampleCount != int64(queueLength) {
-		t.Errorf("Incorrect samplecount, expected: %d got: %d", queueLength, *memStatsSet.SampleCount)
-	}
-
 	expectedMemoryUsageInMiBSum := expectedMemoryUsageInMiB * float64(queueLength)
-	if *memStatsSet.Sum != expectedMemoryUsageInMiBSum {
-		t.Errorf("Sum value incorrectly set: %.0f, expected %.0f", *memStatsSet.Sum, expectedMemoryUsageInMiBSum)
-	}
+	require.Equal(t, *memStatsSet.Min, expectedMemoryUsageInMiB)
+	require.Equal(t, *memStatsSet.Max, expectedMemoryUsageInMiB)
+	require.Equal(t, *memStatsSet.SampleCount, int64(queueLength))
+	require.Equal(t, *memStatsSet.Sum, expectedMemoryUsageInMiBSum)
 }
 
 // tests just below and just above the threshold (+/- 1) of int64
@@ -409,106 +408,311 @@ func TestUintOverflow(t *testing.T) {
 func TestCpuStatsSetNotSetToInfinity(t *testing.T) {
 	// timestamps will be used to simulate +Inf CPU Usage
 	// timestamps[0] = timestamps[1]
+	now := time.Now()
 	timestamps := []time.Time{
-		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
-		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
-		parseNanoTime("2015-02-12T21:22:05.333776335Z"),
+		now.Add(-time.Microsecond * 1000),
+		now.Add(-time.Microsecond * 1000),
+		now,
 	}
 	cpuTimes := []uint64{
-		22400432,
-		116499979,
-		248503503,
-	}
-	memoryUtilizationInBytes := []uint64{
-		3649536,
-		3649536,
-		3649536,
+		0,
+		10000000,
+		20000000,
 	}
 
 	// Create and add container stats
 	queueLength := 3
 	queue := NewQueue(queueLength)
 	for i, time := range timestamps {
-		queue.add(&ContainerStats{cpuUsage: cpuTimes[i], memoryUsage: memoryUtilizationInBytes[i], timestamp: time})
+		queue.add(&ContainerStats{cpuUsage: cpuTimes[i], memoryUsage: 1024, timestamp: time})
 	}
 	cpuStatsSet, err := queue.GetCPUStatsSet()
 	if err != nil {
 		t.Errorf("Error getting cpu stats set: %v", err)
 	}
-
-	// Compute expected usage by using the 1st and 2nd data point in the input queue
-	// queue.Add should have ignored the 0th item as it has the same timestamp as the
-	// 1st item
-	expectedCpuUsage := 100 * float32(cpuTimes[2]-cpuTimes[1]) / float32(timestamps[2].Nanosecond()-timestamps[1].Nanosecond())
-	max := float32(aws.Float64Value(cpuStatsSet.Max))
-	if max != expectedCpuUsage {
-		t.Errorf("Computed cpuStatsSet.Max (%f) != expected value (%f)", max, expectedCpuUsage)
-	}
-	sum := float32(aws.Float64Value(cpuStatsSet.Sum))
-	if sum != expectedCpuUsage {
-		t.Errorf("Computed cpuStatsSet.Sum (%f) != expected value (%f)", sum, expectedCpuUsage)
-	}
-	min := float32(aws.Float64Value(cpuStatsSet.Min))
-	if min != expectedCpuUsage {
-		t.Errorf("Computed cpuStatsSet.Min (%f) != expected value (%f)", min, expectedCpuUsage)
-	}
-
-	// Expected sample count is 1 and not 2 as one data point would be discarded on
-	// account of invalid timestamp
-	sampleCount := aws.Int64Value(cpuStatsSet.SampleCount)
-	if sampleCount != 1 {
-		t.Errorf("Computed cpuStatsSet.SampleCount (%d) != expected value (%d)", sampleCount, 1)
-	}
+	require.Equal(t, float64(1000), *cpuStatsSet.Max)
+	require.Equal(t, float64(1000), *cpuStatsSet.Min)
+	require.Equal(t, float64(1000), *cpuStatsSet.Sum)
+	require.Equal(t, int64(1), *cpuStatsSet.SampleCount)
 }
 
-func TestResetThresholdElapsed(t *testing.T) {
-	// create a queue
-	queueLength := 3
-	queue := NewQueue(queueLength)
-
-	queue.Reset()
-
-	thresholdElapsed := queue.resetThresholdElapsed(2 * time.Millisecond)
-	assert.False(t, thresholdElapsed, "Queue reset threshold is not expected to elapse right after reset")
-
-	time.Sleep(3 * time.Millisecond)
-	thresholdElapsed = queue.resetThresholdElapsed(2 * time.Millisecond)
-
-	assert.True(t, thresholdElapsed, "Queue reset threshold is expected to elapse after waiting")
-}
-
-func TestEnoughDatapointsInBuffer(t *testing.T) {
-	// timestamps will be used to simulate +Inf CPU Usage
-	// timestamps[0] = timestamps[1]
+func TestCPUStatSetFailsWhenSampleCountIsZero(t *testing.T) {
 	timestamps := []time.Time{
 		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
 		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
-		parseNanoTime("2015-02-12T21:22:05.333776335Z"),
 	}
 	cpuTimes := []uint64{
 		22400432,
 		116499979,
-		248503503,
+	}
+	memoryUtilizationInBytes := []uint64{
+		3649536,
+		3649536,
+	}
+	// create a queue
+	queue := NewQueue(3)
+
+	for i, time := range timestamps {
+		queue.add(&ContainerStats{cpuUsage: cpuTimes[i], memoryUsage: memoryUtilizationInBytes[i], timestamp: time})
+	}
+
+	// if two cpu had identical timestamps,
+	// then there will not be enough valid cpu percentage stats to create
+	// a valid CpuStatsSet, and this function call should fail.
+	_, err := queue.GetCPUStatsSet()
+	require.Error(t, err)
+}
+
+func TestCPUStatsWithIdenticalTimestampsGetSameUsagePercent(t *testing.T) {
+	now := time.Now()
+	timestamps := []time.Time{
+		now.Add(-time.Nanosecond * 2),
+		now.Add(-time.Nanosecond * 1),
+		now,
+		now,
+	}
+	cpuTimes := []uint64{
+		0,
+		1,
+		3,
+		4,
+	}
+
+	// create a queue
+	queue := NewQueue(4)
+
+	for i, time := range timestamps {
+		queue.add(&ContainerStats{cpuUsage: cpuTimes[i], memoryUsage: 3649536, timestamp: time})
+	}
+
+	// if there were three cpu metrics, and two had identical timestamps,
+	// then there will not be enough valid cpu percentage stats to create
+	// a valid CpuStatsSet, and this function call should fail.
+	statSet, err := queue.GetCPUStatsSet()
+	require.NoError(t, err)
+	require.Equal(t, float64(200), *statSet.Max)
+	require.Equal(t, float64(100), *statSet.Min)
+	require.Equal(t, int64(3), *statSet.SampleCount)
+	require.Equal(t, float64(500), *statSet.Sum)
+}
+
+func TestHugeCPUUsagePercentDoesntGetCapped(t *testing.T) {
+	now := time.Now()
+	timestamps := []time.Time{
+		now.Add(-time.Nanosecond * 2),
+		now.Add(-time.Nanosecond * 1),
+		now,
+	}
+	cpuTimes := []uint64{
+		0,
+		1,
+		300000000,
+	}
+	// create a queue
+	queue := NewQueue(4)
+
+	for i, time := range timestamps {
+		queue.add(&ContainerStats{cpuUsage: cpuTimes[i], memoryUsage: 3649536, timestamp: time})
+	}
+
+	statSet, err := queue.GetCPUStatsSet()
+	require.NoError(t, err)
+	require.Equal(t, float64(30000001024), *statSet.Max)
+	require.Equal(t, float64(100), *statSet.Min)
+	require.Equal(t, int64(2), *statSet.SampleCount)
+	require.Equal(t, float64(30000001124), *statSet.Sum)
+}
+
+// If there are only 2 datapoints, and both have the same timestamp,
+// then sample count will be 0 for per sec metrics and GetNetworkStats should return error
+func TestPerSecNetworkStatSetFailsWhenSampleCountIsZero(t *testing.T) {
+	timestamps := []time.Time{
+		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
+		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
+	}
+	cpuTimes := []uint64{
+		22400432,
+		116499979,
+	}
+	memoryUtilizationInBytes := []uint64{
+		3649536,
+		3649536,
+	}
+
+	bytesReceivedTransmitted := []uint64{
+		364953689,
+		364953689,
+	}
+
+	queue := NewQueue(3)
+
+	for i, time := range timestamps {
+		queue.add(&ContainerStats{
+			cpuUsage:    cpuTimes[i],
+			memoryUsage: memoryUtilizationInBytes[i],
+			networkStats: &NetworkStats{
+				RxBytes:          bytesReceivedTransmitted[i],
+				RxDropped:        0,
+				RxErrors:         bytesReceivedTransmitted[i],
+				RxPackets:        bytesReceivedTransmitted[i],
+				TxBytes:          bytesReceivedTransmitted[i],
+				TxDropped:        bytesReceivedTransmitted[i],
+				TxErrors:         0,
+				TxPackets:        bytesReceivedTransmitted[i],
+				RxBytesPerSecond: float32(nan32()),
+				TxBytesPerSecond: float32(nan32()),
+			},
+			timestamp: time})
+	}
+
+	// if we have identical timestamps and 2 datapoints
+	// then there will not be enough valid network stats  to create
+	// a valid network stats set, and this function call should fail.
+	stats, err := queue.GetNetworkStatsSet()
+	require.Errorf(t, err, "Received unexpected network stats set %v", stats)
+}
+
+// If there are only 3 datapoints in total and among them 2 are identical, then GetNetworkStats should not return error
+func TestPerSecNetworkStatSetPassWithThreeDatapoints(t *testing.T) {
+	timestamps := []time.Time{
+		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
+		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
+		parseNanoTime("2015-02-12T21:32:05.131117533Z"),
+	}
+	cpuTimes := []uint64{
+		22400432,
+		116499979,
+		115436856,
 	}
 	memoryUtilizationInBytes := []uint64{
 		3649536,
 		3649536,
 		3649536,
 	}
-	// create a queue
-	queueLength := 3
-	queue := NewQueue(queueLength)
 
-	enoughDataPoints := queue.enoughDatapointsInBuffer()
-	assert.False(t, enoughDataPoints, "Queue is expected to not have enough data points right after creation")
-	for i, time := range timestamps {
-		queue.add(&ContainerStats{cpuUsage: cpuTimes[i], memoryUsage: memoryUtilizationInBytes[i], timestamp: time})
+	bytesReceivedTransmitted := []uint64{
+		364953689,
+		364953689,
+		364953689,
 	}
 
-	enoughDataPoints = queue.enoughDatapointsInBuffer()
-	assert.True(t, enoughDataPoints, "Queue is expected to have enough data points when it has more than 2 msgs queued")
+	queue := NewQueue(3)
 
-	queue.Reset()
-	enoughDataPoints = queue.enoughDatapointsInBuffer()
-	assert.False(t, enoughDataPoints, "Queue is expected to not have enough data points right after RESET")
+	for i, time := range timestamps {
+		queue.add(&ContainerStats{
+			cpuUsage:    cpuTimes[i],
+			memoryUsage: memoryUtilizationInBytes[i],
+			networkStats: &NetworkStats{
+				RxBytes:          bytesReceivedTransmitted[i],
+				RxDropped:        0,
+				RxErrors:         bytesReceivedTransmitted[i],
+				RxPackets:        bytesReceivedTransmitted[i],
+				TxBytes:          bytesReceivedTransmitted[i],
+				TxDropped:        bytesReceivedTransmitted[i],
+				TxErrors:         0,
+				TxPackets:        bytesReceivedTransmitted[i],
+				RxBytesPerSecond: float32(nan32()),
+				TxBytesPerSecond: float32(nan32()),
+			},
+			timestamp: time})
+	}
+
+	// if we have identical timestamps and 2 datapoints
+	// then there will not be enough valid network stats  to create
+	// a valid network stats set, and this function call should fail.
+	stats, err := queue.GetNetworkStatsSet()
+	require.NoErrorf(t, err, "Received unexpected network stats set %v", stats)
+}
+
+// If there are only 2 datapoints, and both have different timestamp, GetNetworkStats should not return error
+func TestPerSecNetworkStatSetPassWithTwoDatapoints(t *testing.T) {
+	timestamps := []time.Time{
+		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
+		parseNanoTime("2015-02-12T21:32:05.131117533Z"),
+	}
+	cpuTimes := []uint64{
+		22400432,
+		116499979,
+	}
+	memoryUtilizationInBytes := []uint64{
+		3649536,
+		3649536,
+	}
+
+	bytesReceivedTransmitted := []uint64{
+		364953689,
+		364953689,
+	}
+
+	queue := NewQueue(3)
+
+	for i, time := range timestamps {
+		queue.add(&ContainerStats{
+			cpuUsage:    cpuTimes[i],
+			memoryUsage: memoryUtilizationInBytes[i],
+			networkStats: &NetworkStats{
+				RxBytes:          bytesReceivedTransmitted[i],
+				RxDropped:        0,
+				RxErrors:         bytesReceivedTransmitted[i],
+				RxPackets:        bytesReceivedTransmitted[i],
+				TxBytes:          bytesReceivedTransmitted[i],
+				TxDropped:        bytesReceivedTransmitted[i],
+				TxErrors:         0,
+				TxPackets:        bytesReceivedTransmitted[i],
+				RxBytesPerSecond: float32(nan32()),
+				TxBytesPerSecond: float32(nan32()),
+			},
+			timestamp: time})
+	}
+
+	// if we have identical timestamps and 2 datapoints
+	// then there will not be enough valid network stats  to create
+	// a valid network stats set, and this function call should fail.
+	stats, err := queue.GetNetworkStatsSet()
+	require.NoErrorf(t, err, "Received unexpected network stats set %v", stats)
+}
+
+// If there are only 1 datapoint, then GetNetworkStats should return error
+func TestPerSecNetworkStatSetFailWithOneDatapoint(t *testing.T) {
+	timestamps := []time.Time{
+		parseNanoTime("2015-02-12T21:22:05.131117533Z"),
+	}
+
+	cpuTimes := []uint64{
+		22400432,
+	}
+	memoryUtilizationInBytes := []uint64{
+		3649536,
+	}
+
+	bytesReceivedTransmitted := []uint64{
+		364953689,
+	}
+
+	queue := NewQueue(3)
+
+	for i, time := range timestamps {
+		queue.add(&ContainerStats{
+			cpuUsage:    cpuTimes[i],
+			memoryUsage: memoryUtilizationInBytes[i],
+			networkStats: &NetworkStats{
+				RxBytes:          bytesReceivedTransmitted[i],
+				RxDropped:        0,
+				RxErrors:         bytesReceivedTransmitted[i],
+				RxPackets:        bytesReceivedTransmitted[i],
+				TxBytes:          bytesReceivedTransmitted[i],
+				TxDropped:        bytesReceivedTransmitted[i],
+				TxErrors:         0,
+				TxPackets:        bytesReceivedTransmitted[i],
+				RxBytesPerSecond: float32(nan32()),
+				TxBytesPerSecond: float32(nan32()),
+			},
+			timestamp: time})
+	}
+
+	// if we have identical timestamps and 2 datapoints
+	// then there will not be enough valid network stats  to create
+	// a valid network stats set, and this function call should fail.
+	stats, err := queue.GetNetworkStatsSet()
+	require.Errorf(t, err, "Received unexpected network stats set %v", stats)
 }

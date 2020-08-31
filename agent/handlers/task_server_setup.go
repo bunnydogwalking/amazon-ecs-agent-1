@@ -1,4 +1,4 @@
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -14,6 +14,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -26,6 +27,7 @@ import (
 	v1 "github.com/aws/amazon-ecs-agent/agent/handlers/v1"
 	v2 "github.com/aws/amazon-ecs-agent/agent/handlers/v2"
 	v3 "github.com/aws/amazon-ecs-agent/agent/handlers/v3"
+	v4 "github.com/aws/amazon-ecs-agent/agent/handlers/v4"
 	"github.com/aws/amazon-ecs-agent/agent/logger/audit"
 	"github.com/aws/amazon-ecs-agent/agent/stats"
 	"github.com/aws/amazon-ecs-agent/agent/utils/retry"
@@ -66,6 +68,8 @@ func taskServerSetup(credentialsManager credentials.Manager,
 	v2HandlersSetup(muxRouter, state, ecsClient, statsEngine, cluster, credentialsManager, auditLogger, availabilityZone, containerInstanceArn)
 
 	v3HandlersSetup(muxRouter, state, ecsClient, statsEngine, cluster, availabilityZone, containerInstanceArn)
+
+	v4HandlersSetup(muxRouter, state, ecsClient, statsEngine, cluster, availabilityZone, containerInstanceArn)
 
 	limiter := tollbooth.NewLimiter(int64(steadyStateRate), nil)
 	limiter.SetOnLimitReached(handlersutils.LimitReachedHandler(auditLogger))
@@ -130,9 +134,29 @@ func v3HandlersSetup(muxRouter *mux.Router,
 	muxRouter.HandleFunc(v3.ContainerAssociationPath, v3.ContainerAssociationHandler(state))
 }
 
+// v4HandlerSetup adda all handlers in v4 package to the mux router
+func v4HandlersSetup(muxRouter *mux.Router,
+	state dockerstate.TaskEngineState,
+	ecsClient api.ECSClient,
+	statsEngine stats.Engine,
+	cluster string,
+	availabilityZone string,
+	containerInstanceArn string) {
+	muxRouter.HandleFunc(v4.ContainerMetadataPath, v4.ContainerMetadataHandler(state))
+	muxRouter.HandleFunc(v4.TaskMetadataPath, v4.TaskMetadataHandler(state, ecsClient, cluster, availabilityZone, containerInstanceArn, false))
+	muxRouter.HandleFunc(v4.TaskWithTagsMetadataPath, v4.TaskMetadataHandler(state, ecsClient, cluster, availabilityZone, containerInstanceArn, true))
+	muxRouter.HandleFunc(v4.ContainerStatsPath, v4.ContainerStatsHandler(state, statsEngine))
+	muxRouter.HandleFunc(v4.TaskStatsPath, v4.TaskStatsHandler(state, statsEngine))
+	muxRouter.HandleFunc(v4.ContainerAssociationsPath, v4.ContainerAssociationsHandler(state))
+	muxRouter.HandleFunc(v4.ContainerAssociationPathWithSlash, v4.ContainerAssociationHandler(state))
+	muxRouter.HandleFunc(v4.ContainerAssociationPath, v4.ContainerAssociationHandler(state))
+}
+
 // ServeTaskHTTPEndpoint serves task/container metadata, task/container stats, and IAM Role Credentials
 // for tasks being managed by the agent.
-func ServeTaskHTTPEndpoint(credentialsManager credentials.Manager,
+func ServeTaskHTTPEndpoint(
+	ctx context.Context,
+	credentialsManager credentials.Manager,
 	state dockerstate.TaskEngineState,
 	ecsClient api.ECSClient,
 	containerInstanceArn string,
@@ -140,7 +164,6 @@ func ServeTaskHTTPEndpoint(credentialsManager credentials.Manager,
 	statsEngine stats.Engine,
 	availabilityZone string) {
 	// Create and initialize the audit log
-	// TODO Use seelog's programmatic configuration instead of xml.
 	logger, err := seelog.LoggerFromConfigAsString(audit.AuditLoggerConfig(cfg))
 	if err != nil {
 		seelog.Errorf("Error initializing the audit log: %v", err)
@@ -153,14 +176,22 @@ func ServeTaskHTTPEndpoint(credentialsManager credentials.Manager,
 	server := taskServerSetup(credentialsManager, auditLogger, state, ecsClient, cfg.Cluster, statsEngine,
 		cfg.TaskMetadataSteadyStateRate, cfg.TaskMetadataBurstRate, availabilityZone, containerInstanceArn)
 
+	go func() {
+		<-ctx.Done()
+		if err := server.Shutdown(context.Background()); err != nil {
+			// Error from closing listeners, or context timeout:
+			seelog.Infof("HTTP server Shutdown: %v", err)
+		}
+	}()
+
 	for {
 		retry.RetryWithBackoff(retry.NewExponentialBackoff(time.Second, time.Minute, 0.2, 2), func() error {
-			// TODO, make this cancellable and use the passed in context;
-			err := server.ListenAndServe()
-			if err != nil {
-				seelog.Errorf("Error running http api: %v", err)
+			if err := server.ListenAndServe(); err != http.ErrServerClosed {
+				seelog.Errorf("Error running task api: %v", err)
+				return err
 			}
-			return err
+			// server was cleanly closed via context
+			return nil
 		})
 	}
 }

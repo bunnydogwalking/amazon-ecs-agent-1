@@ -1,6 +1,6 @@
 // +build linux,unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -21,25 +21,29 @@ import (
 
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/ec2"
+	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	mock_statemanager "github.com/aws/amazon-ecs-agent/agent/statemanager/mocks"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCompatibilityEnabledSuccess(t *testing.T) {
-	ctrl, creds, state, images, _, _, stateManagerFactory, saveableOptionFactory := setup(t)
+	ctrl, creds, _, images, _, _, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
 	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
-	cfg.TaskCPUMemLimit = config.DefaultEnabled
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+	cfg.TaskCPUMemLimit = config.BooleanDefaultTrue{Value: config.NotSet}
 
 	agent := &ecsAgent{
 		cfg:                   &cfg,
+		dataClient:            data.NewNoopClient(),
 		stateManagerFactory:   stateManagerFactory,
 		saveableOptionFactory: saveableOptionFactory,
 		ec2MetadataClient:     ec2.NewBlackholeEC2MetadataClient(),
@@ -50,30 +54,39 @@ func TestCompatibilityEnabledSuccess(t *testing.T) {
 		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().Return(stateManager, nil),
 		stateManager.EXPECT().Load().AnyTimes(),
-		state.EXPECT().AllTasks().Return([]*apitask.Task{}),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	containerChangeEventStream := eventstream.NewEventStream("events", ctx)
-	_, _, err := agent.newTaskEngine(containerChangeEventStream, creds, state, images)
+	_, _, err := agent.newTaskEngine(containerChangeEventStream, creds, dockerstate.NewTaskEngineState(), images)
 
 	assert.NoError(t, err)
 	assert.True(t, cfg.TaskCPUMemLimit.Enabled())
 }
 
-func TestCompatibilityDefaultEnabledFail(t *testing.T) {
-	ctrl, creds, state, images, _, _, stateManagerFactory, saveableOptionFactory := setup(t)
+func TestCompatibilityNotSetFail(t *testing.T) {
+	ctrl, creds, _, images, _, _, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
 	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
-	cfg.TaskCPUMemLimit = config.DefaultEnabled
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+	cfg.TaskCPUMemLimit = config.BooleanDefaultTrue{Value: config.NotSet}
+
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
+	populateBoltDB(dataClient, t)
+
+	// Put a bad task in previously saved state.
+	for _, task := range getTaskListWithOneBadTask() {
+		require.NoError(t, dataClient.SaveTask(task))
+	}
 
 	agent := &ecsAgent{
 		cfg:                   &cfg,
+		dataClient:            dataClient,
 		stateManagerFactory:   stateManagerFactory,
 		saveableOptionFactory: saveableOptionFactory,
 		ec2MetadataClient:     ec2.NewBlackholeEC2MetadataClient(),
@@ -83,29 +96,38 @@ func TestCompatibilityDefaultEnabledFail(t *testing.T) {
 		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().Return(stateManager, nil),
 		stateManager.EXPECT().Load().AnyTimes(),
-		state.EXPECT().AllTasks().Return(getTaskListWithOneBadTask()),
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	containerChangeEventStream := eventstream.NewEventStream("events", ctx)
-	_, _, err := agent.newTaskEngine(containerChangeEventStream, creds, state, images)
+	_, _, err := agent.newTaskEngine(containerChangeEventStream, creds, dockerstate.NewTaskEngineState(), images)
 
 	assert.NoError(t, err)
 	assert.False(t, cfg.TaskCPUMemLimit.Enabled())
 }
 
 func TestCompatibilityExplicitlyEnabledFail(t *testing.T) {
-	ctrl, creds, state, images, _, _, stateManagerFactory, saveableOptionFactory := setup(t)
+	ctrl, creds, _, images, _, _, stateManagerFactory, saveableOptionFactory := setup(t)
 	defer ctrl.Finish()
 	stateManager := mock_statemanager.NewMockStateManager(ctrl)
 
 	cfg := getTestConfig()
-	cfg.Checkpoint = true
-	cfg.TaskCPUMemLimit = config.ExplicitlyEnabled
+	cfg.Checkpoint = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+	cfg.TaskCPUMemLimit = config.BooleanDefaultTrue{Value: config.ExplicitlyEnabled}
+
+	dataClient, cleanup := newTestDataClient(t)
+	defer cleanup()
+	populateBoltDB(dataClient, t)
+
+	// Put a bad task in previously saved state.
+	for _, task := range getTaskListWithOneBadTask() {
+		require.NoError(t, dataClient.SaveTask(task))
+	}
 
 	agent := &ecsAgent{
 		cfg:                   &cfg,
+		dataClient:            dataClient,
 		stateManagerFactory:   stateManagerFactory,
 		saveableOptionFactory: saveableOptionFactory,
 		ec2MetadataClient:     ec2.NewBlackholeEC2MetadataClient(),
@@ -115,21 +137,19 @@ func TestCompatibilityExplicitlyEnabledFail(t *testing.T) {
 		stateManagerFactory.EXPECT().NewStateManager(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().Return(stateManager, nil),
 		stateManager.EXPECT().Load().AnyTimes(),
-		state.EXPECT().AllTasks().Return(getTaskListWithOneBadTask()),
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	containerChangeEventStream := eventstream.NewEventStream("events", ctx)
-	_, _, err := agent.newTaskEngine(containerChangeEventStream, creds, state, images)
+	_, _, err := agent.newTaskEngine(containerChangeEventStream, creds, dockerstate.NewTaskEngineState(), images)
 
 	assert.Error(t, err)
 }
 
 func getTaskListWithOneBadTask() []*apitask.Task {
-	oldtask := &apitask.Task{}
-	newtask := &apitask.Task{
-		MemoryCPULimitsEnabled: true,
+	badTask := &apitask.Task{
+		Arn: testTaskARN,
 	}
-	return []*apitask.Task{oldtask, newtask}
+	return []*apitask.Task{badTask}
 }

@@ -1,6 +1,6 @@
 // +build linux,sudo
 
-// Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -65,7 +65,7 @@ const (
 func TestStartStopWithCgroup(t *testing.T) {
 	cfg := defaultTestConfigIntegTest()
 	cfg.TaskCleanupWaitDuration = 1 * time.Second
-	cfg.TaskCPUMemLimit = config.ExplicitlyEnabled
+	cfg.TaskCPUMemLimit.Value = config.ExplicitlyEnabled
 	cfg.CgroupPath = "/cgroup"
 
 	taskEngine, done, _ := setup(cfg, nil, t)

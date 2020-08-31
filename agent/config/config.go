@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -62,7 +62,7 @@ const (
 
 	// DefaultPollingMetricsWaitDuration specifies the default value for polling metrics wait duration
 	// This is only used when PollMetrics is set to true
-	DefaultPollingMetricsWaitDuration = 15 * time.Second
+	DefaultPollingMetricsWaitDuration = DefaultContainerMetricsPublishInterval / 2
 
 	// defaultDockerStopTimeout specifies the value for container stop timeout duration
 	defaultDockerStopTimeout = 30 * time.Second
@@ -97,11 +97,11 @@ const (
 
 	// minimumPollingMetricsWaitDuration specifies the minimum duration to wait before polling for new stats
 	// from docker. This is only used when PollMetrics is set to true
-	minimumPollingMetricsWaitDuration = 1 * time.Second
+	minimumPollingMetricsWaitDuration = 5 * time.Second
 
 	// maximumPollingMetricsWaitDuration specifies the maximum duration to wait before polling for new stats
 	// from docker. This is only used when PollMetrics is set to true
-	maximumPollingMetricsWaitDuration = 20 * time.Second
+	maximumPollingMetricsWaitDuration = DefaultContainerMetricsPublishInterval
 
 	// minimumDockerStopTimeout specifies the minimum value for docker StopContainer API
 	minimumDockerStopTimeout = 1 * time.Second
@@ -132,7 +132,6 @@ const (
 	DefaultTaskMetadataBurstRate = 60
 
 	//Known cached image names
-	CachedImageNamePauseContainer = "amazon/amazon-ecs-pause:0.1.0"
 	CachedImageNameAgentContainer = "amazon/amazon-ecs-agent:latest"
 
 	// DefaultNvidiaRuntime is the name of the runtime to pass Nvidia GPUs to containers
@@ -142,6 +141,10 @@ const (
 	defaultCgroupCPUPeriod = 100 * time.Millisecond
 	maximumCgroupCPUPeriod = 100 * time.Millisecond
 	minimumCgroupCPUPeriod = 8 * time.Millisecond
+
+	// DefaultContainerMetricsPublishInterval is the default interval that we publish
+	// metrics to the ECS telemetry backend (TACS)
+	DefaultContainerMetricsPublishInterval = 20 * time.Second
 )
 
 const (
@@ -184,16 +187,23 @@ var (
 )
 
 // Merge merges two config files, preferring the ones on the left. Any nil or
-// zero values present in the left that are not present in the right will be
-// overridden
+// zero values present in the left that are present in the right will be overridden
 func (cfg *Config) Merge(rhs Config) *Config {
 	left := reflect.ValueOf(cfg).Elem()
 	right := reflect.ValueOf(&rhs).Elem()
 
 	for i := 0; i < left.NumField(); i++ {
 		leftField := left.Field(i)
-		if utils.ZeroOrNil(leftField.Interface()) {
-			leftField.Set(reflect.ValueOf(right.Field(i).Interface()))
+		switch leftField.Interface().(type) {
+		case BooleanDefaultFalse, BooleanDefaultTrue:
+			str, _ := json.Marshal(reflect.ValueOf(leftField.Interface()).Interface())
+			if string(str) == "null" {
+				leftField.Set(reflect.ValueOf(right.Field(i).Interface()))
+			}
+		default:
+			if utils.ZeroOrNil(leftField.Interface()) {
+				leftField.Set(reflect.ValueOf(right.Field(i).Interface()))
+			}
 		}
 	}
 
@@ -344,15 +354,17 @@ func (cfg *Config) validateAndOverrideBounds() error {
 }
 
 func (cfg *Config) pollMetricsOverrides() {
-	if cfg.PollMetrics {
+	if cfg.PollMetrics.Enabled() {
 		if cfg.PollingMetricsWaitDuration < minimumPollingMetricsWaitDuration {
-			seelog.Warnf("Invalid value for polling metrics wait duration, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultPollingMetricsWaitDuration.String(), cfg.PollingMetricsWaitDuration, minimumPollingMetricsWaitDuration)
-			cfg.PollingMetricsWaitDuration = DefaultPollingMetricsWaitDuration
+			seelog.Warnf("ECS_POLLING_METRICS_WAIT_DURATION parsed value (%s) is less than the minimum of %s. Setting polling interval to minimum.",
+				cfg.PollingMetricsWaitDuration, minimumPollingMetricsWaitDuration)
+			cfg.PollingMetricsWaitDuration = minimumPollingMetricsWaitDuration
 		}
 
 		if cfg.PollingMetricsWaitDuration > maximumPollingMetricsWaitDuration {
-			seelog.Warnf("Invalid value for polling metrics wait duration, will be overridden with the default value: %s. Parsed value: %v, maximum value: %v.", DefaultPollingMetricsWaitDuration.String(), cfg.PollingMetricsWaitDuration, maximumPollingMetricsWaitDuration)
-			cfg.PollingMetricsWaitDuration = DefaultPollingMetricsWaitDuration
+			seelog.Warnf("ECS_POLLING_METRICS_WAIT_DURATION parsed value (%s) is greater than the maximum of %s. Setting polling interval to maximum.",
+				cfg.PollingMetricsWaitDuration, maximumPollingMetricsWaitDuration)
+			cfg.PollingMetricsWaitDuration = maximumPollingMetricsWaitDuration
 		}
 	}
 }
@@ -503,26 +515,26 @@ func environmentConfig() (Config, error) {
 		Checkpoint:                          parseCheckpoint(dataDir),
 		EngineAuthType:                      os.Getenv("ECS_ENGINE_AUTH_TYPE"),
 		EngineAuthData:                      NewSensitiveRawMessage([]byte(os.Getenv("ECS_ENGINE_AUTH_DATA"))),
-		UpdatesEnabled:                      utils.ParseBool(os.Getenv("ECS_UPDATES_ENABLED"), false),
+		UpdatesEnabled:                      parseBooleanDefaultFalseConfig("ECS_UPDATES_ENABLED"),
 		UpdateDownloadDir:                   os.Getenv("ECS_UPDATE_DOWNLOAD_DIR"),
-		DisableMetrics:                      utils.ParseBool(os.Getenv("ECS_DISABLE_METRICS"), false),
+		DisableMetrics:                      parseBooleanDefaultFalseConfig("ECS_DISABLE_METRICS"),
 		ReservedMemory:                      parseEnvVariableUint16("ECS_RESERVED_MEMORY"),
 		AvailableLoggingDrivers:             parseAvailableLoggingDrivers(),
-		PrivilegedDisabled:                  utils.ParseBool(os.Getenv("ECS_DISABLE_PRIVILEGED"), false),
-		SELinuxCapable:                      utils.ParseBool(os.Getenv("ECS_SELINUX_CAPABLE"), false),
-		AppArmorCapable:                     utils.ParseBool(os.Getenv("ECS_APPARMOR_CAPABLE"), false),
+		PrivilegedDisabled:                  parseBooleanDefaultFalseConfig("ECS_DISABLE_PRIVILEGED"),
+		SELinuxCapable:                      parseBooleanDefaultFalseConfig("ECS_SELINUX_CAPABLE"),
+		AppArmorCapable:                     parseBooleanDefaultFalseConfig("ECS_APPARMOR_CAPABLE"),
 		TaskCleanupWaitDuration:             parseEnvVariableDuration("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION"),
-		TaskENIEnabled:                      utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_ENI"), false),
-		TaskIAMRoleEnabled:                  utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE"), false),
-		DeleteNonECSImagesEnabled:           utils.ParseBool(os.Getenv("ECS_ENABLE_UNTRACKED_IMAGE_CLEANUP"), false),
-		TaskCPUMemLimit:                     parseTaskCPUMemLimitEnabled(),
+		TaskENIEnabled:                      parseBooleanDefaultFalseConfig("ECS_ENABLE_TASK_ENI"),
+		TaskIAMRoleEnabled:                  parseBooleanDefaultFalseConfig("ECS_ENABLE_TASK_IAM_ROLE"),
+		DeleteNonECSImagesEnabled:           parseBooleanDefaultFalseConfig("ECS_ENABLE_UNTRACKED_IMAGE_CLEANUP"),
+		TaskCPUMemLimit:                     parseBooleanDefaultTrueConfig("ECS_ENABLE_TASK_CPU_MEM_LIMIT"),
 		DockerStopTimeout:                   parseDockerStopTimeout(),
 		ContainerStartTimeout:               parseContainerStartTimeout(),
 		ImagePullInactivityTimeout:          parseImagePullInactivityTimeout(),
 		CredentialsAuditLogFile:             os.Getenv("ECS_AUDIT_LOGFILE"),
 		CredentialsAuditLogDisabled:         utils.ParseBool(os.Getenv("ECS_AUDIT_LOGFILE_DISABLED"), false),
 		TaskIAMRoleEnabledForNetworkHost:    utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST"), false),
-		ImageCleanupDisabled:                utils.ParseBool(os.Getenv("ECS_DISABLE_IMAGE_CLEANUP"), false),
+		ImageCleanupDisabled:                parseBooleanDefaultFalseConfig("ECS_DISABLE_IMAGE_CLEANUP"),
 		MinimumImageDeletionAge:             parseEnvVariableDuration("ECS_IMAGE_MINIMUM_CLEANUP_AGE"),
 		NonECSMinimumImageDeletionAge:       parseEnvVariableDuration("NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE"),
 		ImageCleanupInterval:                parseEnvVariableDuration("ECS_IMAGE_CLEANUP_INTERVAL"),
@@ -532,26 +544,28 @@ func environmentConfig() (Config, error) {
 		ImageCleanupExclusionList:           parseImageCleanupExclusionList("ECS_EXCLUDE_UNTRACKED_IMAGE"),
 		InstanceAttributes:                  instanceAttributes,
 		CNIPluginsPath:                      os.Getenv("ECS_CNI_PLUGINS_PATH"),
-		AWSVPCBlockInstanceMetdata:          utils.ParseBool(os.Getenv("ECS_AWSVPC_BLOCK_IMDS"), false),
+		AWSVPCBlockInstanceMetdata:          parseBooleanDefaultFalseConfig("ECS_AWSVPC_BLOCK_IMDS"),
 		AWSVPCAdditionalLocalRoutes:         additionalLocalRoutes,
-		ContainerMetadataEnabled:            utils.ParseBool(os.Getenv("ECS_ENABLE_CONTAINER_METADATA"), false),
+		ContainerMetadataEnabled:            parseBooleanDefaultFalseConfig("ECS_ENABLE_CONTAINER_METADATA"),
 		DataDirOnHost:                       os.Getenv("ECS_HOST_DATA_DIR"),
-		OverrideAWSLogsExecutionRole:        utils.ParseBool(os.Getenv("ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE"), false),
+		OverrideAWSLogsExecutionRole:        parseBooleanDefaultFalseConfig("ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE"),
 		CgroupPath:                          os.Getenv("ECS_CGROUP_PATH"),
 		TaskMetadataSteadyStateRate:         steadyStateRate,
 		TaskMetadataBurstRate:               burstRate,
-		SharedVolumeMatchFullConfig:         utils.ParseBool(os.Getenv("ECS_SHARED_VOLUME_MATCH_FULL_CONFIG"), false),
+		SharedVolumeMatchFullConfig:         parseBooleanDefaultFalseConfig("ECS_SHARED_VOLUME_MATCH_FULL_CONFIG"),
 		ContainerInstanceTags:               containerInstanceTags,
 		ContainerInstancePropagateTagsFrom:  parseContainerInstancePropagateTagsFrom(),
-		PollMetrics:                         utils.ParseBool(os.Getenv("ECS_POLL_METRICS"), false),
+		PollMetrics:                         parseBooleanDefaultTrueConfig("ECS_POLL_METRICS"),
 		PollingMetricsWaitDuration:          parseEnvVariableDuration("ECS_POLLING_METRICS_WAIT_DURATION"),
-		DisableDockerHealthCheck:            utils.ParseBool(os.Getenv("ECS_DISABLE_DOCKER_HEALTH_CHECK"), false),
+		DisableDockerHealthCheck:            parseBooleanDefaultFalseConfig("ECS_DISABLE_DOCKER_HEALTH_CHECK"),
 		GPUSupportEnabled:                   utils.ParseBool(os.Getenv("ECS_ENABLE_GPU_SUPPORT"), false),
+		InferentiaSupportEnabled:            utils.ParseBool(os.Getenv("ECS_ENABLE_INF_SUPPORT"), false),
 		NvidiaRuntime:                       os.Getenv("ECS_NVIDIA_RUNTIME"),
 		TaskMetadataAZDisabled:              utils.ParseBool(os.Getenv("ECS_DISABLE_TASK_METADATA_AZ"), false),
 		CgroupCPUPeriod:                     parseCgroupCPUPeriod(),
-		SpotInstanceDrainingEnabled:         utils.ParseBool(os.Getenv("ECS_ENABLE_SPOT_INSTANCE_DRAINING"), false),
+		SpotInstanceDrainingEnabled:         parseBooleanDefaultFalseConfig("ECS_ENABLE_SPOT_INSTANCE_DRAINING"),
 		GMSACapable:                         parseGMSACapability(),
+		VolumePluginCapabilities:            parseVolumePluginCapabilities(),
 	}, err
 }
 

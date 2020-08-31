@@ -1,4 +1,4 @@
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -153,13 +153,6 @@ func (cs *clientServer) publishMetrics() {
 		return
 	}
 
-	// Publish metrics immediately after we connect and wait for ticks. This makes
-	// sure that there is no data loss when a scheduled metrics publishing fails
-	// due to a connection reset.
-	err := cs.publishMetricsOnce()
-	if err != nil && err != stats.EmptyMetricsError {
-		seelog.Warnf("Error publishing metrics: %v", err)
-	}
 	// don't simply range over the ticker since its channel doesn't ever get closed
 	for {
 		select {

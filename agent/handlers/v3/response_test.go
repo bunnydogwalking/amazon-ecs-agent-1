@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -79,7 +79,7 @@ func TestContainerAssociationsResponse(t *testing.T) {
 		state.EXPECT().TaskByArn(taskARN).Return(task, true),
 	)
 
-	associationsResponse, err := newAssociationsResponse(dockerID, taskARN, associationType, state)
+	associationsResponse, err := NewAssociationsResponse(dockerID, taskARN, associationType, state)
 	assert.NoError(t, err)
 
 	associationsResponseJSON, err := json.Marshal(associationsResponse)
@@ -97,7 +97,7 @@ func TestContainerAssociationResponse(t *testing.T) {
 
 	state.EXPECT().TaskByArn(taskARN).Return(task, true)
 
-	associationResponse, err := newAssociationResponse(taskARN, associationType, associationName, state)
+	associationResponse, err := NewAssociationResponse(taskARN, associationType, associationName, state)
 	assert.NoError(t, err)
 
 	// the response is expected to be the same as the association value

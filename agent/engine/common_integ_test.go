@@ -1,6 +1,6 @@
 // +build sudo integration
 
-// Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -33,20 +33,20 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/containermetadata"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/sdkclientfactory"
 	"github.com/aws/amazon-ecs-agent/agent/ec2"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/statechange"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	log "github.com/cihub/seelog"
 	"github.com/stretchr/testify/assert"
 )
 
 func defaultTestConfigIntegTest() *config.Config {
 	cfg, _ := config.NewConfig(ec2.NewBlackholeEC2MetadataClient())
-	cfg.TaskCPUMemLimit = config.ExplicitlyDisabled
+	cfg.TaskCPUMemLimit.Value = config.ExplicitlyDisabled
 	cfg.ImagePullBehavior = config.ImagePullPreferCachedBehavior
 	return cfg
 }
@@ -145,7 +145,7 @@ func setup(cfg *config.Config, state dockerstate.TaskEngineState, t *testing.T) 
 		state = dockerstate.NewTaskEngineState()
 	}
 	imageManager := NewImageManager(cfg, dockerClient, state)
-	imageManager.SetSaver(statemanager.NewNoopStateManager())
+	imageManager.SetDataClient(data.NewNoopClient())
 	metadataManager := containermetadata.NewManager(dockerClient, cfg)
 
 	taskEngine := NewDockerTaskEngine(cfg, dockerClient, credentialsManager,

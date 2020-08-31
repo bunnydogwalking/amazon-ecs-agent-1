@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -24,4 +24,5 @@ import (
 type ContainerMetadataResolver interface {
 	ResolveTask(string) (*apitask.Task, error)
 	ResolveContainer(string) (*apicontainer.DockerContainer, error)
+	ResolveTaskByARN(string) (*apitask.Task, error)
 }

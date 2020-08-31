@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -40,8 +40,8 @@ func TestDownloadFile(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
+	mockFile := mock_oswrapper.NewMockFile()
 	mockS3Client := mock_s3.NewMockS3Client(ctrl)
-	mockFile := mock_oswrapper.NewMockFile(ctrl)
 
 	mockS3Client.EXPECT().DownloadWithContext(gomock.Any(), mockFile, gomock.Any()).Do(func(ctx aws.Context,
 		w io.WriterAt, input *s3sdk.GetObjectInput) {
@@ -58,7 +58,7 @@ func TestDownloadFileError(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockS3Client := mock_s3.NewMockS3Client(ctrl)
-	mockFile := mock_oswrapper.NewMockFile(ctrl)
+	mockFile := mock_oswrapper.NewMockFile()
 
 	mockS3Client.EXPECT().DownloadWithContext(gomock.Any(), mockFile, gomock.Any()).Return(int64(0), errors.New("test error"))
 

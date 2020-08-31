@@ -1,6 +1,6 @@
 // +build linux
 
-// Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -52,12 +52,12 @@ func (agent *ecsAgent) checkCompatibility(engine engine.TaskEngine) error {
 		return nil
 	}
 
-	if agent.cfg.TaskCPUMemLimit == config.ExplicitlyEnabled {
+	if agent.cfg.TaskCPUMemLimit.Value == config.ExplicitlyEnabled {
 		return errors.New("App: unable to load old tasks because TaskCPUMemLimits setting is incompatible with old state.")
 	}
 
 	seelog.Warn("App: disabling TaskCPUMemLimit.")
-	agent.cfg.TaskCPUMemLimit = config.ExplicitlyDisabled
+	agent.cfg.TaskCPUMemLimit.Value = config.ExplicitlyDisabled
 
 	return nil
 }

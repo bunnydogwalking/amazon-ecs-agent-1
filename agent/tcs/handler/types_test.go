@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -37,25 +37,25 @@ func TestIsMetricsDisabled(t *testing.T) {
 			description: "Config not set should cause error",
 		},
 		{
-			param:       &TelemetrySessionParams{Cfg: &config.Config{DisableMetrics: false, DisableDockerHealthCheck: false}},
+			param:       &TelemetrySessionParams{Cfg: &config.Config{DisableMetrics: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled}, DisableDockerHealthCheck: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled}}},
 			result:      false,
 			err:         nil,
 			description: "No metrics was disable should return false",
 		},
 		{
-			param:       &TelemetrySessionParams{Cfg: &config.Config{DisableMetrics: true, DisableDockerHealthCheck: false}},
+			param:       &TelemetrySessionParams{Cfg: &config.Config{DisableMetrics: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}, DisableDockerHealthCheck: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled}}},
 			result:      false,
 			err:         nil,
 			description: "Only health metrics was disable should return false",
 		},
 		{
-			param:       &TelemetrySessionParams{Cfg: &config.Config{DisableMetrics: false, DisableDockerHealthCheck: true}},
+			param:       &TelemetrySessionParams{Cfg: &config.Config{DisableMetrics: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled}, DisableDockerHealthCheck: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}}},
 			result:      false,
 			err:         nil,
 			description: "Only telemetry metrics was disable should return false",
 		},
 		{
-			param:       &TelemetrySessionParams{Cfg: &config.Config{DisableMetrics: true, DisableDockerHealthCheck: true}},
+			param:       &TelemetrySessionParams{Cfg: &config.Config{DisableMetrics: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}, DisableDockerHealthCheck: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}}},
 			result:      true,
 			err:         nil,
 			description: "both telemetry and health metrics were disable should return true",

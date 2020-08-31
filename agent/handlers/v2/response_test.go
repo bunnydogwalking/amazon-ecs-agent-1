@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -294,7 +294,7 @@ func TestTaskResponseMarshal(t *testing.T) {
 		V3EndpointID: "",
 		Image:        imageName,
 		ImageID:      imageID,
-		Ports: []apicontainer.PortBinding{
+		KnownPortBindingsUnsafe: []apicontainer.PortBinding{
 			{
 				ContainerPort: 80,
 				Protocol:      apicontainer.TransportProtocolTCP,
@@ -414,7 +414,7 @@ func TestContainerResponseMarshal(t *testing.T) {
 			Status: apicontainerstatus.ContainerHealthy,
 			Since:  aws.Time(timeRFC3339),
 		},
-		Ports: []apicontainer.PortBinding{
+		KnownPortBindingsUnsafe: []apicontainer.PortBinding{
 			{
 				ContainerPort: 80,
 				Protocol:      apicontainer.TransportProtocolTCP,

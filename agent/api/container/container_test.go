@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -267,6 +267,17 @@ func TestInjectV3MetadataEndpoint(t *testing.T) {
 	assert.NotNil(t, container.Environment)
 	assert.Equal(t, container.Environment[MetadataURIEnvironmentVariableName],
 		fmt.Sprintf(MetadataURIFormat, "myV3EndpointID"))
+}
+
+func TestInjectV4MetadataEndpoint(t *testing.T) {
+	container := Container{
+		V3EndpointID: "EndpointID",
+	}
+	container.InjectV4MetadataEndpoint()
+
+	assert.NotNil(t, container.Environment)
+	assert.Equal(t, container.Environment[MetadataURIEnvVarNameV4],
+		fmt.Sprintf(MetadataURIFormatV4, "EndpointID"))
 }
 
 func TestShouldCreateWithSSMSecret(t *testing.T) {
@@ -654,4 +665,95 @@ func TestGetNetworkModeFromHostConfig(t *testing.T) {
 			assert.Equal(t, tc.expectedOutput, tc.container.GetNetworkModeFromHostConfig())
 		})
 	}
+}
+
+func TestShouldCreateWithEnvfiles(t *testing.T) {
+	cases := []struct {
+		in  Container
+		out bool
+	}{
+		{
+			Container{
+				Name:  "containerName",
+				Image: "image:tag",
+				EnvironmentFiles: []EnvironmentFile{
+					EnvironmentFile{
+						Value: "s3://bucket/envfile",
+						Type:  "s3",
+					},
+				},
+			}, true},
+		{
+			Container{
+				Name:             "containerName",
+				Image:            "image:tag",
+				EnvironmentFiles: nil,
+			}, false},
+	}
+
+	for _, test := range cases {
+		container := test.in
+		assert.Equal(t, test.out, container.ShouldCreateWithEnvFiles())
+	}
+}
+
+func TestMergeEnvironmentVariablesFromEnvfiles(t *testing.T) {
+	cases := []struct {
+		Name                   string
+		InContainerEnvironment map[string]string
+		InEnvVarList           []map[string]string
+		OutEnvVarMap           map[string]string
+	}{
+		{
+			Name:                   "merge one item",
+			InContainerEnvironment: map[string]string{"key1": "value1"},
+			InEnvVarList:           []map[string]string{{"key2": "value2"}},
+			OutEnvVarMap: map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+			},
+		},
+		{
+			Name:                   "merge single item to nil env var map",
+			InContainerEnvironment: nil,
+			InEnvVarList:           []map[string]string{{"key": "value"}},
+			OutEnvVarMap:           map[string]string{"key": "value"},
+		},
+		{
+			Name:                   "merge one item key already exists",
+			InContainerEnvironment: map[string]string{"key1": "value1"},
+			InEnvVarList:           []map[string]string{{"key1": "value2"}},
+			OutEnvVarMap:           map[string]string{"key1": "value1"},
+		},
+		{
+			Name:                   "merge two items with same key",
+			InContainerEnvironment: map[string]string{"key1": "value1"},
+			InEnvVarList: []map[string]string{
+				{"key2": "value2"},
+				{"key2": "value3"},
+			},
+			OutEnvVarMap: map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+			},
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.Name, func(t *testing.T) {
+			container := Container{
+				Environment: test.InContainerEnvironment,
+			}
+
+			container.MergeEnvironmentVariablesFromEnvfiles(test.InEnvVarList)
+			assert.True(t, reflect.DeepEqual(test.OutEnvVarMap, container.Environment))
+		})
+	}
+}
+
+func TestRequireNeuronRuntime(t *testing.T) {
+	c := &Container{
+		Environment: map[string]string{neuronVisibleDevicesEnvVar: "all"},
+	}
+	assert.True(t, c.RequireNeuronRuntime())
 }

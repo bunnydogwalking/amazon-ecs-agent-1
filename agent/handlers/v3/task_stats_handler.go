@@ -1,4 +1,4 @@
-// Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -26,15 +26,18 @@ import (
 )
 
 // TaskStatsPath specifies the relative URI path for serving task stats.
-var TaskStatsPath = "/v3/" + utils.ConstructMuxVar(v3EndpointIDMuxName, utils.AnythingButSlashRegEx) + "/task/stats"
+var TaskStatsPath = "/v3/" + utils.ConstructMuxVar(V3EndpointIDMuxName, utils.AnythingButSlashRegEx) + "/task/stats"
 
 // TaskStatsHandler returns the handler method for handling task stats requests.
 func TaskStatsHandler(state dockerstate.TaskEngineState, statsEngine stats.Engine) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		taskARN, err := getTaskARNByRequest(r, state)
+		taskARN, err := GetTaskARNByRequest(r, state)
 		if err != nil {
-			errResponseJSON, _ := json.Marshal(
+			errResponseJSON, err := json.Marshal(
 				fmt.Sprintf("V3 task stats handler: unable to get task arn from request: %s", err.Error()))
+			if e := utils.WriteResponseIfMarshalError(w, err); e != nil {
+				return
+			}
 			utils.WriteJSONToResponse(w, http.StatusBadRequest, errResponseJSON, utils.RequestTypeTaskStats)
 			return
 		}

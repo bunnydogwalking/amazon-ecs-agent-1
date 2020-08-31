@@ -1,6 +1,6 @@
 // +build windows,unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -84,7 +84,8 @@ func TestPostUnmarshalWindowsCanonicalPaths(t *testing.T) {
 		Version:             "1",
 		Containers: []*apicontainer.Container{
 			{
-				Name: "myName",
+				Name:          "myName",
+				TaskARNUnsafe: "myArn",
 				MountPoints: []apicontainer.MountPoint{
 					{
 						ContainerPath: `c:\container\path`,
@@ -109,11 +110,11 @@ func TestPostUnmarshalWindowsCanonicalPaths(t *testing.T) {
 	seqNum := int64(42)
 	task, err := TaskFromACS(&taskFromAcs, &ecsacs.PayloadMessage{SeqNum: &seqNum})
 	assert.Nil(t, err, "Should be able to handle acs task")
-	cfg := config.Config{TaskCPUMemLimit: config.ExplicitlyDisabled}
+	cfg := config.Config{TaskCPUMemLimit: config.BooleanDefaultTrue{Value: config.ExplicitlyDisabled}}
 	task.PostUnmarshalTask(&cfg, nil, nil, nil, nil)
 
 	for _, container := range task.Containers { // remove v3 endpoint from each container because it's randomly generated
-		removeV3EndpointConfig(container)
+		removeV3andV4EndpointConfig(container)
 	}
 	assert.Equal(t, expectedTask.Containers, task.Containers, "Containers should be equal")
 	assert.Equal(t, expectedTask.Volumes, task.Volumes, "Volumes should be equal")
@@ -121,10 +122,11 @@ func TestPostUnmarshalWindowsCanonicalPaths(t *testing.T) {
 
 // removeV3EndpointConfig removes the v3 endpoint id and the injected env for a container
 // so that checking all other fields can be easier
-func removeV3EndpointConfig(container *apicontainer.Container) {
+func removeV3andV4EndpointConfig(container *apicontainer.Container) {
 	container.SetV3EndpointID("")
 	if container.Environment != nil {
 		delete(container.Environment, apicontainer.MetadataURIEnvironmentVariableName)
+		delete(container.Environment, apicontainer.MetadataURIEnvVarNameV4)
 	}
 	if len(container.Environment) == 0 {
 		container.Environment = nil
@@ -186,7 +188,8 @@ func TestDockerHostConfigRawConfigMerging(t *testing.T) {
 		},
 	}
 
-	hostConfig, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), minDockerClientAPIVersion)
+	hostConfig, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask),
+		minDockerClientAPIVersion, &config.Config{})
 	assert.Nil(t, configErr)
 
 	expected := dockercontainer.HostConfig{
@@ -208,43 +211,43 @@ func TestCPUPercentBasedOnUnboundedEnabled(t *testing.T) {
 	cpuShareScaleFactor := runtime.NumCPU() * cpuSharesPerCore
 	testcases := []struct {
 		cpu          int64
-		cpuUnbounded bool
+		cpuUnbounded config.BooleanDefaultFalse
 		cpuPercent   int64
 	}{
 		{
 			cpu:          0,
-			cpuUnbounded: true,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 			cpuPercent:   0,
 		},
 		{
 			cpu:          1,
-			cpuUnbounded: true,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 			cpuPercent:   1,
 		},
 		{
 			cpu:          0,
-			cpuUnbounded: false,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 			cpuPercent:   1,
 		},
 		{
 			cpu:          1,
-			cpuUnbounded: false,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 			cpuPercent:   1,
 		},
 		{
 			cpu:          100,
-			cpuUnbounded: true,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 			cpuPercent:   100 * percentageFactor / int64(cpuShareScaleFactor),
 		},
 		{
 			cpu:          100,
-			cpuUnbounded: false,
+			cpuUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 			cpuPercent:   100 * percentageFactor / int64(cpuShareScaleFactor),
 		},
 	}
 	for _, tc := range testcases {
 		t.Run(fmt.Sprintf("container cpu-%d,cpu unbounded tasks enabled- %t,expected cpu percent-%d",
-			tc.cpu, tc.cpuUnbounded, tc.cpuPercent), func(t *testing.T) {
+			tc.cpu, tc.cpuUnbounded.Enabled(), tc.cpuPercent), func(t *testing.T) {
 			testTask := &Task{
 				Containers: []*apicontainer.Container{
 					{
@@ -257,7 +260,8 @@ func TestCPUPercentBasedOnUnboundedEnabled(t *testing.T) {
 				},
 			}
 
-			hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), minDockerClientAPIVersion)
+			hostconfig, err := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask),
+				minDockerClientAPIVersion, &config.Config{})
 			assert.Nil(t, err)
 			assert.Empty(t, hostconfig.CPUShares)
 			assert.Equal(t, tc.cpuPercent, hostconfig.CPUPercent)
@@ -291,22 +295,24 @@ func TestWindowsMemoryReservationOption(t *testing.T) {
 			},
 		},
 		PlatformFields: PlatformFields{
-			MemoryUnbounded: false,
+			MemoryUnbounded: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 		},
 	}
 
 	// With MemoryUnbounded set to false, MemoryReservation is not overridden
-	config, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	cfg, configErr := testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask),
+		defaultDockerClientAPIVersion, &config.Config{})
 
 	assert.Nil(t, configErr)
-	assert.EqualValues(t, nonZeroMemoryReservationValue, config.MemoryReservation)
+	assert.EqualValues(t, nonZeroMemoryReservationValue, cfg.MemoryReservation)
 
 	// With MemoryUnbounded set to true, tasks with no memory hard limit will have their memory reservation set to zero
-	testTask.PlatformFields.MemoryUnbounded = true
-	config, configErr = testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask), defaultDockerClientAPIVersion)
+	testTask.PlatformFields.MemoryUnbounded = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
+	cfg, configErr = testTask.DockerHostConfig(testTask.Containers[0], dockerMap(testTask),
+		defaultDockerClientAPIVersion, &config.Config{})
 
 	assert.Nil(t, configErr)
-	assert.EqualValues(t, expectedMemoryReservationValue, config.MemoryReservation)
+	assert.EqualValues(t, expectedMemoryReservationValue, cfg.MemoryReservation)
 }
 
 func TestGetCanonicalPath(t *testing.T) {

@@ -1,6 +1,6 @@
 // +build linux,unit
 
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -58,11 +58,11 @@ func TestVolumeDriverCapabilitiesUnix(t *testing.T) {
 			dockerclient.GelfDriver,
 			dockerclient.FluentdDriver,
 		},
-		PrivilegedDisabled:         false,
-		SELinuxCapable:             true,
-		AppArmorCapable:            true,
-		TaskENIEnabled:             true,
-		AWSVPCBlockInstanceMetdata: true,
+		PrivilegedDisabled:         config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
+		SELinuxCapable:             config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		AppArmorCapable:            config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		TaskENIEnabled:             config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		AWSVPCBlockInstanceMetdata: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		TaskCleanupWaitDuration:    config.DefaultConfig().TaskCleanupWaitDuration,
 	}
 
@@ -85,15 +85,20 @@ func TestVolumeDriverCapabilitiesUnix(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.privileged-container",
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
-		"com.amazonaws.ecs.capability.docker-remote-api.1.18",
-		"com.amazonaws.ecs.capability.logging-driver.json-file",
-		"com.amazonaws.ecs.capability.logging-driver.syslog",
-		"com.amazonaws.ecs.capability.logging-driver.journald",
-		"com.amazonaws.ecs.capability.selinux",
-		"com.amazonaws.ecs.capability.apparmor",
-		attributePrefix + taskENIAttributeSuffix,
+		capabilityPrefix + "privileged-container",
+		capabilityPrefix + "docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.18",
+		capabilityPrefix + "logging-driver.json-file",
+		capabilityPrefix + "logging-driver.syslog",
+		capabilityPrefix + "logging-driver.journald",
+		capabilityPrefix + "selinux",
+		capabilityPrefix + "apparmor",
+		attributePrefix + "docker-plugin.local",
+		attributePrefix + "docker-plugin.fancyvolumedriver",
+		attributePrefix + "docker-plugin.coolvolumedriver",
+		attributePrefix + "docker-plugin.volumedriver",
+		attributePrefix + "docker-plugin.volumedriver.latest",
+		attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -106,24 +111,6 @@ func TestVolumeDriverCapabilitiesUnix(t *testing.T) {
 			{
 				Name:  aws.String(attributePrefix + cniPluginVersionSuffix),
 				Value: aws.String("v1"),
-			},
-			{
-				Name: aws.String(attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix),
-			},
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + "docker-plugin.fancyvolumedriver"),
-			},
-			{
-				Name: aws.String(attributePrefix + "docker-plugin.coolvolumedriver"),
-			},
-			{
-				Name: aws.String(attributePrefix + "docker-plugin.volumedriver"),
-			},
-			{
-				Name: aws.String(attributePrefix + "docker-plugin.volumedriver.latest"),
 			},
 		}...)
 
@@ -142,9 +129,11 @@ func TestVolumeDriverCapabilitiesUnix(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
 }
 
@@ -157,7 +146,7 @@ func TestNvidiaDriverCapabilitiesUnix(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		GPUSupportEnabled:  true,
 	}
 
@@ -175,7 +164,13 @@ func TestNvidiaDriverCapabilitiesUnix(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.17",
+		attributePrefix + "docker-plugin.local",
+		attributePrefix + capabilityPrivateRegistryAuthASM,
+		attributePrefix + capabilitySecretEnvSSM,
+		attributePrefix + capabilitySecretLogDriverSSM,
+		// nvidia driver version capability
+		attributePrefix + "nvidia-driver-version.396.44",
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -183,26 +178,6 @@ func TestNvidiaDriverCapabilitiesUnix(t *testing.T) {
 		expectedCapabilities = append(expectedCapabilities,
 			&ecs.Attribute{Name: aws.String(name)})
 	}
-	expectedCapabilities = append(expectedCapabilities,
-		[]*ecs.Attribute{
-			// linux specific capabilities
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityPrivateRegistryAuthASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverSSM),
-			},
-			// nvidia driver version capability
-			{
-				Name: aws.String(attributePrefix + "nvidia-driver-version.396.44"),
-			},
-		}...)
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
@@ -223,9 +198,11 @@ func TestNvidiaDriverCapabilitiesUnix(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
 }
 
@@ -238,7 +215,7 @@ func TestEmptyNvidiaDriverCapabilitiesUnix(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		GPUSupportEnabled:  true,
 	}
 
@@ -256,7 +233,11 @@ func TestEmptyNvidiaDriverCapabilitiesUnix(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.17",
+		attributePrefix + "docker-plugin.local",
+		attributePrefix + capabilityPrivateRegistryAuthASM,
+		attributePrefix + capabilitySecretEnvSSM,
+		attributePrefix + capabilitySecretLogDriverSSM,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -264,23 +245,6 @@ func TestEmptyNvidiaDriverCapabilitiesUnix(t *testing.T) {
 		expectedCapabilities = append(expectedCapabilities,
 			&ecs.Attribute{Name: aws.String(name)})
 	}
-	expectedCapabilities = append(expectedCapabilities,
-		[]*ecs.Attribute{
-			// linux specific capabilities
-
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityPrivateRegistryAuthASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverSSM),
-			},
-		}...)
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
@@ -301,9 +265,11 @@ func TestEmptyNvidiaDriverCapabilitiesUnix(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
 }
 
@@ -317,9 +283,9 @@ func TestENITrunkingCapabilitiesUnix(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
-		TaskENIEnabled:     true,
-		ENITrunkingEnabled: true,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		TaskENIEnabled:     config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		ENITrunkingEnabled: config.BooleanDefaultTrue{Value: config.ExplicitlyEnabled},
 	}
 
 	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(true, nil)
@@ -338,8 +304,14 @@ func TestENITrunkingCapabilitiesUnix(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.17",
+		attributePrefix + "docker-plugin.local",
 		attributePrefix + taskENIAttributeSuffix,
+		attributePrefix + taskENITrunkingAttributeSuffix,
+		attributePrefix + taskENITrunkingAttributeSuffix,
+		attributePrefix + capabilityPrivateRegistryAuthASM,
+		attributePrefix + capabilitySecretEnvSSM,
+		attributePrefix + capabilitySecretLogDriverSSM,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -355,23 +327,8 @@ func TestENITrunkingCapabilitiesUnix(t *testing.T) {
 				Value: aws.String("v1"),
 			},
 			{
-				Name: aws.String(attributePrefix + taskENITrunkingAttributeSuffix),
-			},
-			{
 				Name:  aws.String(attributePrefix + branchCNIPluginVersionSuffix),
 				Value: aws.String("v2"),
-			},
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityPrivateRegistryAuthASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverSSM),
 			},
 		}...)
 
@@ -390,10 +347,13 @@ func TestENITrunkingCapabilitiesUnix(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
+
 }
 
 func TestNoENITrunkingCapabilitiesUnix(t *testing.T) {
@@ -406,9 +366,9 @@ func TestNoENITrunkingCapabilitiesUnix(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
-		TaskENIEnabled:     true,
-		ENITrunkingEnabled: false,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		TaskENIEnabled:     config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		ENITrunkingEnabled: config.BooleanDefaultTrue{Value: config.ExplicitlyDisabled},
 	}
 
 	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(true, nil)
@@ -426,10 +386,13 @@ func TestNoENITrunkingCapabilitiesUnix(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.17",
+		attributePrefix + "docker-plugin.local",
 		attributePrefix + taskENIAttributeSuffix,
+		attributePrefix + capabilityPrivateRegistryAuthASM,
+		attributePrefix + capabilitySecretEnvSSM,
+		attributePrefix + capabilitySecretLogDriverSSM,
 	}
-
 	var expectedCapabilities []*ecs.Attribute
 	for _, name := range expectedCapabilityNames {
 		expectedCapabilities = append(expectedCapabilities,
@@ -441,18 +404,6 @@ func TestNoENITrunkingCapabilitiesUnix(t *testing.T) {
 			{
 				Name:  aws.String(attributePrefix + cniPluginVersionSuffix),
 				Value: aws.String("v1"),
-			},
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityPrivateRegistryAuthASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverSSM),
 			},
 		}...)
 
@@ -471,9 +422,11 @@ func TestNoENITrunkingCapabilitiesUnix(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
 }
 
@@ -486,7 +439,7 @@ func TestPIDAndIPCNamespaceSharingCapabilitiesUnix(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 
 	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(true, nil)
@@ -503,7 +456,18 @@ func TestPIDAndIPCNamespaceSharingCapabilitiesUnix(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.17",
+		attributePrefix + "docker-plugin.local",
+		attributePrefix + capabilityPrivateRegistryAuthASM,
+		attributePrefix + capabilitySecretEnvSSM,
+		attributePrefix + capabilitySecretLogDriverSSM,
+		attributePrefix + capabilityECREndpoint,
+		attributePrefix + capabilitySecretEnvASM,
+		attributePrefix + capabilitySecretLogDriverASM,
+		attributePrefix + capabilityContainerOrdering,
+		attributePrefix + capabilityFullTaskSync,
+		attributePrefix + capabilityEnvFilesS3,
+		attributePrefix + capabiltyPIDAndIPCNamespaceSharing,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -511,40 +475,6 @@ func TestPIDAndIPCNamespaceSharingCapabilitiesUnix(t *testing.T) {
 		expectedCapabilities = append(expectedCapabilities,
 			&ecs.Attribute{Name: aws.String(name)})
 	}
-	expectedCapabilities = append(expectedCapabilities,
-		[]*ecs.Attribute{
-			// linux specific capabilities
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityPrivateRegistryAuthASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityECREndpoint),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityContainerOrdering),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityFullTaskSync),
-			},
-			{
-				Name: aws.String(attributePrefix + capabiltyPIDAndIPCNamespaceSharing),
-			},
-		}...)
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
@@ -559,9 +489,11 @@ func TestPIDAndIPCNamespaceSharingCapabilitiesUnix(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
 }
 
@@ -574,7 +506,7 @@ func TestPIDAndIPCNamespaceSharingCapabilitiesNoPauseContainer(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 
 	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(false, errors.New("mock error"))
@@ -591,7 +523,17 @@ func TestPIDAndIPCNamespaceSharingCapabilitiesNoPauseContainer(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.17",
+		attributePrefix + "docker-plugin.local",
+		attributePrefix + capabilityPrivateRegistryAuthASM,
+		attributePrefix + capabilitySecretEnvSSM,
+		attributePrefix + capabilitySecretLogDriverSSM,
+		attributePrefix + capabilityECREndpoint,
+		attributePrefix + capabilitySecretEnvASM,
+		attributePrefix + capabilitySecretLogDriverASM,
+		attributePrefix + capabilityContainerOrdering,
+		attributePrefix + capabilityFullTaskSync,
+		attributePrefix + capabilityEnvFilesS3,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -599,37 +541,6 @@ func TestPIDAndIPCNamespaceSharingCapabilitiesNoPauseContainer(t *testing.T) {
 		expectedCapabilities = append(expectedCapabilities,
 			&ecs.Attribute{Name: aws.String(name)})
 	}
-	expectedCapabilities = append(expectedCapabilities,
-		[]*ecs.Attribute{
-			// linux specific capabilities
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityPrivateRegistryAuthASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityECREndpoint),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityContainerOrdering),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityFullTaskSync),
-			},
-		}...)
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
@@ -644,9 +555,11 @@ func TestPIDAndIPCNamespaceSharingCapabilitiesNoPauseContainer(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
 }
 
@@ -659,7 +572,7 @@ func TestAppMeshCapabilitiesUnix(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 
 	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(true, nil)
@@ -676,7 +589,19 @@ func TestAppMeshCapabilitiesUnix(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.17",
+		attributePrefix + "docker-plugin.local",
+		attributePrefix + capabilityPrivateRegistryAuthASM,
+		attributePrefix + capabilitySecretEnvSSM,
+		attributePrefix + capabilitySecretLogDriverSSM,
+		attributePrefix + capabilityECREndpoint,
+		attributePrefix + capabilitySecretEnvASM,
+		attributePrefix + capabilitySecretLogDriverASM,
+		attributePrefix + capabilityContainerOrdering,
+		attributePrefix + capabilityFullTaskSync,
+		attributePrefix + capabilityEnvFilesS3,
+		attributePrefix + capabiltyPIDAndIPCNamespaceSharing,
+		attributePrefix + appMeshAttributeSuffix,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -684,43 +609,7 @@ func TestAppMeshCapabilitiesUnix(t *testing.T) {
 		expectedCapabilities = append(expectedCapabilities,
 			&ecs.Attribute{Name: aws.String(name)})
 	}
-	expectedCapabilities = append(expectedCapabilities,
-		[]*ecs.Attribute{
-			// linux specific capabilities
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityPrivateRegistryAuthASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityECREndpoint),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityContainerOrdering),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityFullTaskSync),
-			},
-			{
-				Name: aws.String(attributePrefix + capabiltyPIDAndIPCNamespaceSharing),
-			},
-			{
-				Name: aws.String(attributePrefix + appMeshAttributeSuffix),
-			},
-		}...)
+
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
@@ -735,9 +624,11 @@ func TestAppMeshCapabilitiesUnix(t *testing.T) {
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	for _, expected := range expectedCapabilities {
+		assert.Contains(t, capabilities, &ecs.Attribute{
+			Name:  expected.Name,
+			Value: expected.Value,
+		})
 	}
 }
 
@@ -755,7 +646,7 @@ func TestTaskEIACapabilitiesNoOptimizedCPU(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 
 	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(true, nil)
@@ -798,7 +689,7 @@ func TestTaskEIACapabilitiesWithOptimizedCPU(t *testing.T) {
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 
 	conf := &config.Config{
-		PrivilegedDisabled: true,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 
 	utils.OpenFile = func(path string) (*os.File, error) {
@@ -839,7 +730,7 @@ func resetOpenFile() {
 	utils.OpenFile = os.Open
 }
 
-func TestAWSLoggingDriverAndLogRouterCapabilitiesUnix(t *testing.T) {
+func TestCapabilitiesUnix(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	client := mock_dockerapi.NewMockDockerClient(ctrl)
@@ -847,7 +738,8 @@ func TestAWSLoggingDriverAndLogRouterCapabilitiesUnix(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
+		PrivilegedDisabled:       config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
+		VolumePluginCapabilities: []string{capabilityEFSAuth},
 	}
 
 	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(true, nil)
@@ -864,7 +756,24 @@ func TestAWSLoggingDriverAndLogRouterCapabilitiesUnix(t *testing.T) {
 	)
 
 	expectedCapabilityNames := []string{
-		"com.amazonaws.ecs.capability.docker-remote-api.1.17",
+		capabilityPrefix + "docker-remote-api.1.17",
+		attributePrefix + "docker-plugin.local",
+		attributePrefix + capabilityPrivateRegistryAuthASM,
+		attributePrefix + capabilitySecretEnvSSM,
+		attributePrefix + capabilitySecretLogDriverSSM,
+		attributePrefix + capabilityECREndpoint,
+		attributePrefix + capabilitySecretEnvASM,
+		attributePrefix + capabilitySecretLogDriverASM,
+		attributePrefix + capabilityContainerOrdering,
+		attributePrefix + capabiltyPIDAndIPCNamespaceSharing,
+		attributePrefix + appMeshAttributeSuffix,
+		attributePrefix + taskEIAAttributeSuffix,
+		attributePrefix + capabilityFirelensFluentd,
+		attributePrefix + capabilityFirelensFluentbit,
+		attributePrefix + capabilityEFS,
+		attributePrefix + capabilityEFSAuth,
+		capabilityPrefix + capabilityFirelensLoggingDriver,
+		attributePrefix + capabilityEnvFilesS3,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -872,55 +781,6 @@ func TestAWSLoggingDriverAndLogRouterCapabilitiesUnix(t *testing.T) {
 		expectedCapabilities = append(expectedCapabilities,
 			&ecs.Attribute{Name: aws.String(name)})
 	}
-	expectedCapabilities = append(expectedCapabilities,
-		[]*ecs.Attribute{
-			// linux specific capabilities
-			{
-				Name: aws.String("ecs.capability.docker-plugin.local"),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityPrivateRegistryAuthASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverSSM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityECREndpoint),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretEnvASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilitySecretLogDriverASM),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityContainerOrdering),
-			},
-			{
-				Name: aws.String(attributePrefix + capabiltyPIDAndIPCNamespaceSharing),
-			},
-			{
-				Name: aws.String(attributePrefix + appMeshAttributeSuffix),
-			},
-			{
-				Name: aws.String(attributePrefix + taskEIAAttributeSuffix),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityFirelensFluentd),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityFirelensFluentbit),
-			},
-			{
-				Name: aws.String(attributePrefix + capabilityEFS),
-			},
-			{
-				Name: aws.String(capabilityPrefix + capabilityFirelensLoggingDriver),
-			},
-		}...)
 	ctx, cancel := context.WithCancel(context.TODO())
 	// Cancel the context to cancel async routines
 	defer cancel()
@@ -951,7 +811,7 @@ func TestFirelensConfigCapabilitiesUnix(t *testing.T) {
 	mockCredentialsProvider := app_mocks.NewMockProvider(ctrl)
 	mockPauseLoader := mock_pause.NewMockLoader(ctrl)
 	conf := &config.Config{
-		PrivilegedDisabled: true,
+		PrivilegedDisabled: config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 	}
 
 	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(true, nil)

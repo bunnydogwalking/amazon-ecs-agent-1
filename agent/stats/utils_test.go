@@ -1,6 +1,6 @@
 //+build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -18,6 +18,7 @@ package stats
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/docker/docker/api/types"
@@ -35,20 +36,6 @@ const (
 	expectedTxDropped = uint64(10)
 	expectedTxErrors  = uint64(0)
 )
-
-func TestIsNetworkStatsError(t *testing.T) {
-	isNetStatsErr := isNetworkStatsError(fmt.Errorf("no such file or directory"))
-	if isNetStatsErr {
-		// Expect it to not be a net stats error
-		t.Error("Error incorrectly reported as network stats error")
-	}
-
-	isNetStatsErr = isNetworkStatsError(fmt.Errorf("open /sys/class/net/veth2f5f3e4/statistics/tx_bytes: no such file or directory"))
-	if !isNetStatsErr {
-		// Expect this to be a net stats error
-		t.Error("Error incorrectly reported as non network stats error")
-	}
-}
 
 func TestDockerStatsToContainerStatsMemUsage(t *testing.T) {
 	jsonStat := fmt.Sprintf(`
@@ -92,4 +79,6 @@ func validateNetworkMetrics(t *testing.T, netStats *NetworkStats) {
 	assert.Equal(t, expectedTxPackets, netStats.TxPackets)
 	assert.Equal(t, expectedTxDropped, netStats.TxDropped)
 	assert.Equal(t, expectedTxErrors, netStats.TxErrors)
+	assert.True(t, math.IsNaN(float64(netStats.RxBytesPerSecond)))
+	assert.True(t, math.IsNaN(float64(netStats.TxBytesPerSecond)))
 }

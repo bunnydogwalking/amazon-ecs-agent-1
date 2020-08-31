@@ -1,4 +1,4 @@
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -54,7 +54,7 @@ func (params *TelemetrySessionParams) time() ttime.Time {
 
 func (params *TelemetrySessionParams) isContainerHealthMetricsDisabled() (bool, error) {
 	if params.Cfg != nil {
-		return params.Cfg.DisableMetrics && params.Cfg.DisableDockerHealthCheck, nil
+		return params.Cfg.DisableMetrics.Enabled() && params.Cfg.DisableDockerHealthCheck.Enabled(), nil
 	}
 	return false, errors.New("Config is empty in the tcs session parameter")
 }

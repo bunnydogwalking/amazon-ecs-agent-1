@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"). You
 # may not use this file except in compliance with the License. A copy of
@@ -17,7 +17,7 @@
 set -e
 
 REGISTRY_IMAGE="registry:2.7.0"
-NGINX_IMAGE="nginx:1.15.8"
+NGINX_IMAGE="nginx:stable"
 
 ROOT=$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )
 cd "${ROOT}"
@@ -47,8 +47,8 @@ mirror_local_image() {
 setup_parallel_pull_image() {
   local image_name="127.0.0.1:51670/$1:parallel-pull-fts"
   echo "Generating parallel pull image $image_name"
- 
-  # Get new random bits every time we build 
+
+  # Get new random bits every time we build
   head -c 25m < /dev/urandom > docker-context/random-bits
   docker build -t "$image_name" docker-context
 
@@ -57,33 +57,25 @@ setup_parallel_pull_image() {
 }
 
 for image in "amazon/amazon-ecs-netkitten" "amazon/amazon-ecs-volumes-test" "amazon/amazon-ecs-pid-namespace-test" \
-				"amazon/amazon-ecs-ipc-namespace-test" "amazon/squid" "amazon/awscli" \
+				"amazon/amazon-ecs-ipc-namespace-test" "amazon/awscli" \
 				"amazon/image-cleanup-test-image1" "amazon/image-cleanup-test-image2" \
-				"amazon/image-cleanup-test-image3" "amazon/fluentd" "amazon/amazon-ecs-agent-introspection-validator" \
-				"amazon/amazon-ecs-taskmetadata-validator" "amazon/amazon-ecs-v3-task-endpoint-validator" \
-				"amazon/amazon-ecs-container-metadata-file-validator" "amazon/amazon-ecs-elastic-inference-validator" \
-				"amazon/amazon-appmesh-plugin-validator" "amazon/amazon-ecs-eni-trunking-validator" \
-				"amazon/firelens-fluentd" "amazon/fluent-logger"; do
+				"amazon/image-cleanup-test-image3" "amazon/fluentd" \
+				"amazon/amazon-ecs-taskmetadata-validator"; do
   mirror_local_image "${image}:make" "127.0.0.1:51670/${image}:latest"
 done
-
-# amazon/firelens-fluentbit:make is only built on amd but not arm.
-if [[ -n $(docker images -q amazon/firelens-fluentbit:make) ]]; then
-	mirror_local_image "amazon/firelens-fluentbit:make" "127.0.0.1:51670/amazon/firelens-fluentbit:latest"
-fi
 
 # Remove the tag so this image can be deleted successfully in the docker image cleanup integ tests
 docker rmi amazon/image-cleanup-test-image1:make amazon/image-cleanup-test-image2:make amazon/image-cleanup-test-image3:make
 
-mirror_image busybox:1.29.3 "127.0.0.1:51670/busybox:latest"
+mirror_image busybox:1.32.0 "127.0.0.1:51670/busybox:latest"
 mirror_image "$NGINX_IMAGE" "127.0.0.1:51670/nginx:latest"
-mirror_image ubuntu:16.04 "127.0.0.1:51670/ubuntu:latest"
+mirror_image ubuntu:20.04 "127.0.0.1:51670/ubuntu:latest"
 
 # create a context folder used by docker build. It will only have a file
 # full of random bits so that the parallel pull images are different.
 mkdir -p docker-context
 cat << EOF > docker-context/Dockerfile
-FROM amazon/amazon-ecs-pause:0.1.0 
+FROM amazon/amazon-ecs-pause:0.1.0
 ADD random-bits /random-bits
 EOF
 
@@ -92,7 +84,7 @@ for image in "busybox" "ubuntu" "consul" "debian" "httpd" "crux" "nginx" "redis"
 done
 
 # cleanup the context
-rm -rf docker-context 
+rm -rf docker-context
 
 mirror_local_image "${REGISTRY_IMAGE}" "127.0.0.1:51670/registry:parallel-pull-fts"
 

@@ -1,6 +1,6 @@
 // +build linux
 
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -88,7 +88,7 @@ func (agent *ecsAgent) appendNvidiaDriverVersionAttribute(capabilities []*ecs.At
 }
 
 func (agent *ecsAgent) appendENITrunkingCapabilities(capabilities []*ecs.Attribute) []*ecs.Attribute {
-	if !agent.cfg.ENITrunkingEnabled {
+	if !agent.cfg.ENITrunkingEnabled.Enabled() {
 		return capabilities
 	}
 	capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+taskENITrunkingAttributeSuffix)
@@ -160,6 +160,10 @@ func (agent *ecsAgent) appendFirelensFluentbitCapabilities(capabilities []*ecs.A
 
 func (agent *ecsAgent) appendEFSCapabilities(capabilities []*ecs.Attribute) []*ecs.Attribute {
 	return appendNameOnlyAttribute(capabilities, attributePrefix+capabilityEFS)
+}
+
+func (agent *ecsAgent) appendEFSVolumePluginCapabilities(capabilities []*ecs.Attribute, pluginCapability string) []*ecs.Attribute {
+	return appendNameOnlyAttribute(capabilities, attributePrefix+pluginCapability)
 }
 
 func (agent *ecsAgent) appendFirelensLoggingDriverCapabilities(capabilities []*ecs.Attribute) []*ecs.Attribute {

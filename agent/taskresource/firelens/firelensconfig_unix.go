@@ -1,5 +1,5 @@
 // +build linux
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -137,7 +137,7 @@ func (firelens *FirelensResource) generateConfig() (generator.FluentConfig, erro
 	// container and other containers if the network is bridge or awsvpc mode. Also add health check sections to support
 	// doing container health check on firlens container for these two modes.
 	if firelens.networkMode == bridgeNetworkMode || firelens.networkMode == awsvpcNetworkMode {
-		inputMap := map[string]string{}
+		var inputMap map[string]string
 		var inputBindValue string
 		if firelens.networkMode == bridgeNetworkMode {
 			inputBindValue = inputBridgeBindValue

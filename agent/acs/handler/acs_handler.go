@@ -1,4 +1,4 @@
-// Copyright 2014-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -29,11 +29,11 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	rolecredentials "github.com/aws/amazon-ecs-agent/agent/credentials"
+	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/eventhandler"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	"github.com/aws/amazon-ecs-agent/agent/utils/retry"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
 	"github.com/aws/amazon-ecs-agent/agent/version"
@@ -83,7 +83,7 @@ type session struct {
 	taskEngine                      engine.TaskEngine
 	ecsClient                       api.ECSClient
 	state                           dockerstate.TaskEngineState
-	stateManager                    statemanager.StateManager
+	dataClient                      data.Client
 	credentialsManager              rolecredentials.Manager
 	taskHandler                     *eventhandler.TaskHandler
 	ctx                             context.Context
@@ -141,7 +141,7 @@ func NewSession(ctx context.Context,
 	credentialsProvider *credentials.Credentials,
 	ecsClient api.ECSClient,
 	taskEngineState dockerstate.TaskEngineState,
-	stateManager statemanager.StateManager,
+	dataClient data.Client,
 	taskEngine engine.TaskEngine,
 	credentialsManager rolecredentials.Manager,
 	taskHandler *eventhandler.TaskHandler, latestSeqNumTaskManifest *int64) Session {
@@ -157,7 +157,7 @@ func NewSession(ctx context.Context,
 		credentialsProvider:             credentialsProvider,
 		ecsClient:                       ecsClient,
 		state:                           taskEngineState,
-		stateManager:                    stateManager,
+		dataClient:                      dataClient,
 		taskEngine:                      taskEngine,
 		credentialsManager:              credentialsManager,
 		taskHandler:                     taskHandler,
@@ -194,6 +194,12 @@ func (acsSession *session) Start() error {
 			seelog.Debugf("Received connect to ACS message")
 			// Start a session with ACS
 			acsError := acsSession.startSessionOnce()
+			select {
+			case <-acsSession.ctx.Done():
+				// agent is shutting down, exiting cleanly
+				return nil
+			default:
+			}
 			// Session with ACS was stopped with some error, start processing the error
 			isInactiveInstance := isInactiveInstanceError(acsError)
 			if isInactiveInstance {
@@ -231,8 +237,8 @@ func (acsSession *session) Start() error {
 				}
 			}
 		case <-acsSession.ctx.Done():
-			seelog.Debugf("ACS session context cancelled")
-			return acsSession.ctx.Err()
+			// agent is shutting down, exiting cleanly
+			return nil
 		}
 
 	}
@@ -275,7 +281,7 @@ func (acsSession *session) startACSSession(client wsclient.ClientServer) error {
 		acsSession.containerInstanceARN,
 		client,
 		acsSession.state,
-		acsSession.stateManager,
+		acsSession.dataClient,
 	)
 	eniAttachHandler.start()
 	defer eniAttachHandler.stop()
@@ -289,7 +295,7 @@ func (acsSession *session) startACSSession(client wsclient.ClientServer) error {
 		acsSession.containerInstanceARN,
 		client,
 		acsSession.state,
-		acsSession.stateManager,
+		acsSession.dataClient,
 	)
 	instanceENIAttachHandler.start()
 	defer instanceENIAttachHandler.stop()
@@ -298,7 +304,7 @@ func (acsSession *session) startACSSession(client wsclient.ClientServer) error {
 
 	// Add TaskManifestHandler
 	taskManifestHandler := newTaskManifestHandler(acsSession.ctx, cfg.Cluster, acsSession.containerInstanceARN,
-		client, acsSession.stateManager, acsSession.taskEngine, acsSession.latestSeqNumTaskManifest)
+		client, acsSession.dataClient, acsSession.taskEngine, acsSession.latestSeqNumTaskManifest)
 
 	defer taskManifestHandler.clearAcks()
 	taskManifestHandler.start()
@@ -315,7 +321,7 @@ func (acsSession *session) startACSSession(client wsclient.ClientServer) error {
 		cfg.Cluster,
 		acsSession.containerInstanceARN,
 		client,
-		acsSession.stateManager,
+		acsSession.dataClient,
 		refreshCredsHandler,
 		acsSession.credentialsManager,
 		acsSession.taskHandler, acsSession.latestSeqNumTaskManifest)
@@ -329,7 +335,7 @@ func (acsSession *session) startACSSession(client wsclient.ClientServer) error {
 	// Ignore heartbeat messages; anyMessageHandler gets 'em
 	client.AddRequestHandler(func(*ecsacs.HeartbeatMessage) {})
 
-	updater.AddAgentUpdateHandlers(client, cfg, acsSession.stateManager, acsSession.taskEngine)
+	updater.AddAgentUpdateHandlers(client, cfg, acsSession.state, acsSession.dataClient, acsSession.taskEngine)
 
 	err := client.Connect()
 	if err != nil {
@@ -366,13 +372,17 @@ func (acsSession *session) startACSSession(client wsclient.ClientServer) error {
 		case <-acsSession.ctx.Done():
 			// Stop receiving and sending messages from and to ACS when
 			// the context received from the main function is canceled
-			seelog.Infof("ACS session context cancelled.")
+			seelog.Infof("ACS session exited cleanly.")
 			return acsSession.ctx.Err()
 		case err := <-serveErr:
 			// Stop receiving and sending messages from and to ACS when
 			// client.Serve returns an error. This can happen when the
 			// the connection is closed by ACS or the agent
-			seelog.Infof("ACS connection closed: %v", err)
+			if err == nil || err == io.EOF {
+				seelog.Info("ACS Websocket connection closed for a valid reason")
+			} else {
+				seelog.Errorf("Error: lost websocket connection with Agent Communication Service (ACS): %v", err)
+			}
 			return err
 		}
 	}

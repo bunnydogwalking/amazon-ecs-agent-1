@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -26,8 +26,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/utils/cipher"
 	"github.com/aws/amazon-ecs-agent/agent/version"
 )
-
-const defaultTimeout = 10 * time.Minute
 
 // Taken from the default http.Client behavior
 const defaultDialTimeout = 30 * time.Second

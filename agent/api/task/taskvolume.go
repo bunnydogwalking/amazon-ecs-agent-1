@@ -1,4 +1,4 @@
-// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -16,7 +16,11 @@ package task
 import (
 	"encoding/json"
 
+	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/taskresource"
+	taskresourcetypes "github.com/aws/amazon-ecs-agent/agent/taskresource/types"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
+
 	"github.com/cihub/seelog"
 	"github.com/pkg/errors"
 )
@@ -147,4 +151,34 @@ func (tv *TaskVolume) unmarshalHostVolume(data json.RawMessage) error {
 		tv.Volume = &hostvolume
 	}
 	return nil
+}
+
+// getEFSVolumeDriverName returns the driver name for creating the EFS volume.
+func getEFSVolumeDriverName(cfg *config.Config) string {
+	if taskresourcevolume.UseECSVolumePlugin(cfg) {
+		return taskresourcevolume.ECSVolumePlugin
+	}
+	return taskresourcevolume.DockerLocalDriverName
+}
+
+// getDockerVolumeResource retrieves docker volume resource from task resource map.
+func (task *Task) getDockerVolumeResource() ([]taskresource.TaskResource, bool) {
+	task.lock.RLock()
+	defer task.lock.RUnlock()
+
+	res, ok := task.ResourcesMapUnsafe[taskresourcetypes.DockerVolumeKey]
+	return res, ok
+}
+
+// SetPausePIDInVolumeResources sets the pause container pid field in each volume resource.
+func (task *Task) SetPausePIDInVolumeResources(pid string) {
+	resources, ok := task.getDockerVolumeResource()
+	if !ok {
+		return
+	}
+
+	for _, res := range resources {
+		volRes := res.(*taskresourcevolume.VolumeResource)
+		volRes.SetPauseContainerPID(pid)
+	}
 }

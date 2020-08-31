@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -357,6 +357,9 @@ func TestTaskIPAddress(t *testing.T) {
 	taskARNFromIP, ok := state.GetTaskByIPAddress(addr)
 	assert.True(t, ok)
 	assert.Equal(t, taskARN, taskARNFromIP)
+	ipFromTaskARN, ok := state.GetIPAddressByTaskARN(taskARN)
+	assert.True(t, ok)
+	assert.Equal(t, addr, ipFromTaskARN)
 	taskIP, ok := state.taskToIPUnsafe(taskARN)
 	assert.True(t, ok)
 	assert.Equal(t, addr, taskIP)

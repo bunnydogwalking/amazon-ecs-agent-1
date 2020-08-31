@@ -1,6 +1,6 @@
 // +build unit
 
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,23 +19,26 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
+	mock_io "github.com/aws/amazon-ecs-agent/agent/acs/update_handler/mock"
+	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/data"
+	"github.com/aws/amazon-ecs-agent/agent/engine"
+	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
+	"github.com/aws/amazon-ecs-agent/agent/httpclient"
+	mock_http "github.com/aws/amazon-ecs-agent/agent/httpclient/mock"
+	mock_client "github.com/aws/amazon-ecs-agent/agent/wsclient/mock"
+
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
-	mock_os "github.com/aws/amazon-ecs-agent/agent/acs/update_handler/os/mock"
-	"github.com/aws/amazon-ecs-agent/agent/config"
-	"github.com/aws/amazon-ecs-agent/agent/engine"
-	"github.com/aws/amazon-ecs-agent/agent/httpclient"
-	mock_http "github.com/aws/amazon-ecs-agent/agent/httpclient/mock"
-	"github.com/aws/amazon-ecs-agent/agent/sighandlers/exitcodes"
-	"github.com/aws/amazon-ecs-agent/agent/statemanager"
-	mock_client "github.com/aws/amazon-ecs-agent/agent/wsclient/mock"
 )
 
 func ptr(i interface{}) interface{} {
@@ -44,16 +47,15 @@ func ptr(i interface{}) interface{} {
 	return n.Interface()
 }
 
-func mocks(t *testing.T, cfg *config.Config) (*updater, *gomock.Controller, *config.Config, *mock_os.MockFileSystem, *mock_client.MockClientServer, *mock_http.MockRoundTripper) {
+func mocks(t *testing.T, cfg *config.Config) (*updater, *gomock.Controller, *config.Config, *mock_client.MockClientServer, *mock_http.MockRoundTripper) {
 	if cfg == nil {
 		cfg = &config.Config{
-			UpdatesEnabled:    true,
+			UpdatesEnabled:    config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 			UpdateDownloadDir: filepath.Clean("/tmp/test/"),
 		}
 	}
 	ctrl := gomock.NewController(t)
 
-	mockfs := mock_os.NewMockFileSystem(ctrl)
 	mockacs := mock_client.NewMockClientServer(ctrl)
 	mockhttp := mock_http.NewMockRoundTripper(ctrl)
 	httpClient := httpclient.New(updateDownloadTimeout, false)
@@ -62,16 +64,34 @@ func mocks(t *testing.T, cfg *config.Config) (*updater, *gomock.Controller, *con
 	u := &updater{
 		acs:        mockacs,
 		config:     cfg,
-		fs:         mockfs,
 		httpclient: httpClient,
 	}
 
-	return u, ctrl, cfg, mockfs, mockacs, mockhttp
+	return u, ctrl, cfg, mockacs, mockhttp
 }
 
+var writtenFile bytes.Buffer
+
+func mockOS() func() {
+	oCreateFile := createFile
+	createFile = func(name string) (io.ReadWriteCloser, error) {
+		writtenFile.Reset()
+		return mock_io.NopReadWriteCloser(&writtenFile), nil
+	}
+	writeFile = func(filename string, data []byte, perm os.FileMode) error {
+		return nil
+	}
+	exit = func(code int) {}
+
+	return func() {
+		createFile = oCreateFile
+		writeFile = ioutil.WriteFile
+		exit = os.Exit
+	}
+}
 func TestStageUpdateWithUpdatesDisabled(t *testing.T) {
-	u, ctrl, _, _, mockacs, _ := mocks(t, &config.Config{
-		UpdatesEnabled: false,
+	u, ctrl, _, mockacs, _ := mocks(t, &config.Config{
+		UpdatesEnabled: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 	})
 	defer ctrl.Finish()
 
@@ -95,8 +115,8 @@ func TestStageUpdateWithUpdatesDisabled(t *testing.T) {
 }
 
 func TestPerformUpdateWithUpdatesDisabled(t *testing.T) {
-	u, ctrl, cfg, _, mockacs, _ := mocks(t, &config.Config{
-		UpdatesEnabled: false,
+	u, ctrl, cfg, mockacs, _ := mocks(t, &config.Config{
+		UpdatesEnabled: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 	})
 	defer ctrl.Finish()
 
@@ -118,7 +138,7 @@ func TestPerformUpdateWithUpdatesDisabled(t *testing.T) {
 		},
 	}
 
-	u.performUpdateHandler(statemanager.NewNoopStateManager(), taskEngine)(msg)
+	u.performUpdateHandler(dockerstate.NewTaskEngineState(), data.NewNoopClient(), taskEngine)(msg)
 }
 
 func TestFullUpdateFlow(t *testing.T) {
@@ -131,14 +151,12 @@ func TestFullUpdateFlow(t *testing.T) {
 
 	for region, host := range regions {
 		t.Run(region, func(t *testing.T) {
-			u, ctrl, cfg, mockfs, mockacs, mockhttp := mocks(t, nil)
+			u, ctrl, cfg, mockacs, mockhttp := mocks(t, nil)
 			defer ctrl.Finish()
 
-			var writtenFile bytes.Buffer
+			defer mockOS()()
 			gomock.InOrder(
 				mockhttp.EXPECT().RoundTrip(mock_http.NewHTTPSimpleMatcher("GET", "https://"+host+"/amazon-ecs-agent/update.tar")).Return(mock_http.SuccessResponse("update-tar-data"), nil),
-				mockfs.EXPECT().Create(gomock.Any()).Return(mock_os.NopReadWriteCloser(&writtenFile), nil),
-				mockfs.EXPECT().WriteFile(filepath.Clean("/tmp/test/desired-image"), gomock.Any(), gomock.Any()).Return(nil),
 				mockacs.EXPECT().MakeRequest(gomock.Eq(&ecsacs.AckRequest{
 					Cluster:           ptr("cluster").(*string),
 					ContainerInstance: ptr("containerInstance").(*string),
@@ -149,7 +167,6 @@ func TestFullUpdateFlow(t *testing.T) {
 					ContainerInstance: ptr("containerInstance").(*string),
 					MessageId:         ptr("mid2").(*string),
 				})),
-				mockfs.EXPECT().Exit(exitcodes.ExitUpdate),
 			)
 
 			u.stageUpdateHandler()(&ecsacs.StageUpdateMessage{
@@ -175,7 +192,7 @@ func TestFullUpdateFlow(t *testing.T) {
 				},
 			}
 
-			u.performUpdateHandler(statemanager.NewNoopStateManager(), taskEngine)(msg)
+			u.performUpdateHandler(dockerstate.NewTaskEngineState(), data.NewNoopClient(), taskEngine)(msg)
 		})
 	}
 }
@@ -202,7 +219,7 @@ func (m *nackRequestMatcher) Matches(nack interface{}) bool {
 }
 
 func TestMissingUpdateInfo(t *testing.T) {
-	u, ctrl, _, _, mockacs, _ := mocks(t, nil)
+	u, ctrl, _, mockacs, _ := mocks(t, nil)
 	defer ctrl.Finish()
 
 	mockacs.EXPECT().MakeRequest(&nackRequestMatcher{&ecsacs.NackRequest{
@@ -223,7 +240,7 @@ func (m *nackRequestMatcher) String() string {
 }
 
 func TestUndownloadedUpdate(t *testing.T) {
-	u, ctrl, cfg, _, mockacs, _ := mocks(t, nil)
+	u, ctrl, cfg, mockacs, _ := mocks(t, nil)
 	defer ctrl.Finish()
 
 	mockacs.EXPECT().MakeRequest(&nackRequestMatcher{&ecsacs.NackRequest{
@@ -239,18 +256,16 @@ func TestUndownloadedUpdate(t *testing.T) {
 		MessageId:            ptr("mid").(*string),
 	}
 
-	u.performUpdateHandler(statemanager.NewNoopStateManager(), taskEngine)(msg)
+	u.performUpdateHandler(dockerstate.NewTaskEngineState(), data.NewNoopClient(), taskEngine)(msg)
 }
 
 func TestDuplicateUpdateMessagesWithSuccess(t *testing.T) {
-	u, ctrl, cfg, mockfs, mockacs, mockhttp := mocks(t, nil)
+	u, ctrl, cfg, mockacs, mockhttp := mocks(t, nil)
 	defer ctrl.Finish()
 
-	var writtenFile bytes.Buffer
+	defer mockOS()()
 	gomock.InOrder(
 		mockhttp.EXPECT().RoundTrip(mock_http.NewHTTPSimpleMatcher("GET", "https://s3.amazonaws.com/amazon-ecs-agent/update.tar")).Return(mock_http.SuccessResponse("update-tar-data"), nil),
-		mockfs.EXPECT().Create(gomock.Any()).Return(mock_os.NopReadWriteCloser(&writtenFile), nil),
-		mockfs.EXPECT().WriteFile(filepath.Clean("/tmp/test/desired-image"), gomock.Any(), gomock.Any()).Return(nil),
 		mockacs.EXPECT().MakeRequest(gomock.Eq(&ecsacs.AckRequest{
 			Cluster:           ptr("cluster").(*string),
 			ContainerInstance: ptr("containerInstance").(*string),
@@ -266,7 +281,6 @@ func TestDuplicateUpdateMessagesWithSuccess(t *testing.T) {
 			ContainerInstance: ptr("containerInstance").(*string),
 			MessageId:         ptr("mid3").(*string),
 		})),
-		mockfs.EXPECT().Exit(exitcodes.ExitUpdate),
 	)
 
 	u.stageUpdateHandler()(&ecsacs.StageUpdateMessage{
@@ -304,17 +318,15 @@ func TestDuplicateUpdateMessagesWithSuccess(t *testing.T) {
 		},
 	}
 
-	u.performUpdateHandler(statemanager.NewNoopStateManager(), taskEngine)(msg)
+	u.performUpdateHandler(dockerstate.NewTaskEngineState(), data.NewNoopClient(), taskEngine)(msg)
 }
 
 func TestDuplicateUpdateMessagesWithFailure(t *testing.T) {
-	u, ctrl, cfg, mockfs, mockacs, mockhttp := mocks(t, nil)
+	u, ctrl, cfg, mockacs, mockhttp := mocks(t, nil)
 	defer ctrl.Finish()
 
-	var writtenFile bytes.Buffer
 	gomock.InOrder(
 		mockhttp.EXPECT().RoundTrip(mock_http.NewHTTPSimpleMatcher("GET", "https://s3.amazonaws.com/amazon-ecs-agent/update.tar")).Return(mock_http.SuccessResponse("update-tar-data"), nil),
-		mockfs.EXPECT().Create(gomock.Any()).Return(nil, errors.New("test error")),
 		mockacs.EXPECT().MakeRequest(gomock.Eq(&ecsacs.NackRequest{
 			Cluster:           ptr("cluster").(*string),
 			ContainerInstance: ptr("containerInstance").(*string),
@@ -322,8 +334,6 @@ func TestDuplicateUpdateMessagesWithFailure(t *testing.T) {
 			Reason:            ptr("Unable to download: test error").(*string),
 		})),
 		mockhttp.EXPECT().RoundTrip(mock_http.NewHTTPSimpleMatcher("GET", "https://s3.amazonaws.com/amazon-ecs-agent/update.tar")).Return(mock_http.SuccessResponse("update-tar-data"), nil),
-		mockfs.EXPECT().Create(gomock.Any()).Return(mock_os.NopReadWriteCloser(&writtenFile), nil),
-		mockfs.EXPECT().WriteFile(filepath.Clean("/tmp/test/desired-image"), gomock.Any(), gomock.Any()).Return(nil),
 		mockacs.EXPECT().MakeRequest(gomock.Eq(&ecsacs.AckRequest{
 			Cluster:           ptr("cluster").(*string),
 			ContainerInstance: ptr("containerInstance").(*string),
@@ -334,8 +344,11 @@ func TestDuplicateUpdateMessagesWithFailure(t *testing.T) {
 			ContainerInstance: ptr("containerInstance").(*string),
 			MessageId:         ptr("mid3").(*string),
 		})),
-		mockfs.EXPECT().Exit(exitcodes.ExitUpdate),
 	)
+
+	createFile = func(name string) (closer io.ReadWriteCloser, e error) {
+		return nil, errors.New("test error")
+	}
 
 	u.stageUpdateHandler()(&ecsacs.StageUpdateMessage{
 		ClusterArn:           ptr("cluster").(*string),
@@ -346,6 +359,8 @@ func TestDuplicateUpdateMessagesWithFailure(t *testing.T) {
 			Signature: ptr("6caeef375a080e3241781725b357890758d94b15d7ce63f6b2ff1cb5589f2007").(*string),
 		},
 	})
+
+	defer mockOS()()
 
 	// Multiple requests to stage something with the same signature where the previous update failed
 	// should cause another update attempt to be started
@@ -372,18 +387,16 @@ func TestDuplicateUpdateMessagesWithFailure(t *testing.T) {
 		},
 	}
 
-	u.performUpdateHandler(statemanager.NewNoopStateManager(), taskEngine)(msg)
+	u.performUpdateHandler(dockerstate.NewTaskEngineState(), data.NewNoopClient(), taskEngine)(msg)
 }
 
 func TestNewerUpdateMessages(t *testing.T) {
-	u, ctrl, cfg, mockfs, mockacs, mockhttp := mocks(t, nil)
+	u, ctrl, cfg, mockacs, mockhttp := mocks(t, nil)
 	defer ctrl.Finish()
 
-	var writtenFile bytes.Buffer
+	defer mockOS()()
 	gomock.InOrder(
 		mockhttp.EXPECT().RoundTrip(mock_http.NewHTTPSimpleMatcher("GET", "https://s3.amazonaws.com/amazon-ecs-agent/update.tar")).Return(mock_http.SuccessResponse("update-tar-data"), nil),
-		mockfs.EXPECT().Create(gomock.Any()).Return(mock_os.NopReadWriteCloser(&writtenFile), nil),
-		mockfs.EXPECT().WriteFile(filepath.Clean("/tmp/test/desired-image"), gomock.Any(), gomock.Any()).Return(nil),
 		mockacs.EXPECT().MakeRequest(gomock.Eq(&ecsacs.AckRequest{
 			Cluster:           ptr("cluster").(*string),
 			ContainerInstance: ptr("containerInstance").(*string),
@@ -396,8 +409,6 @@ func TestNewerUpdateMessages(t *testing.T) {
 			Reason:            ptr("New update arrived: StageMIDNew").(*string),
 		}}),
 		mockhttp.EXPECT().RoundTrip(mock_http.NewHTTPSimpleMatcher("GET", "https://s3.amazonaws.com/amazon-ecs-agent/new.tar")).Return(mock_http.SuccessResponse("newer-update-tar-data"), nil),
-		mockfs.EXPECT().Create(gomock.Any()).Return(mock_os.NopReadWriteCloser(&writtenFile), nil),
-		mockfs.EXPECT().WriteFile(filepath.Clean("/tmp/test/desired-image"), gomock.Any(), gomock.Any()).Return(nil),
 		mockacs.EXPECT().MakeRequest(gomock.Eq(&ecsacs.AckRequest{
 			Cluster:           ptr("cluster").(*string),
 			ContainerInstance: ptr("containerInstance").(*string),
@@ -408,7 +419,6 @@ func TestNewerUpdateMessages(t *testing.T) {
 			ContainerInstance: ptr("containerInstance").(*string),
 			MessageId:         ptr("mid2").(*string),
 		})),
-		mockfs.EXPECT().Exit(exitcodes.ExitUpdate),
 	)
 
 	u.stageUpdateHandler()(&ecsacs.StageUpdateMessage{
@@ -448,18 +458,16 @@ func TestNewerUpdateMessages(t *testing.T) {
 		},
 	}
 
-	u.performUpdateHandler(statemanager.NewNoopStateManager(), taskEngine)(msg)
+	u.performUpdateHandler(dockerstate.NewTaskEngineState(), data.NewNoopClient(), taskEngine)(msg)
 }
 
 func TestValidationError(t *testing.T) {
-	u, ctrl, _, mockfs, mockacs, mockhttp := mocks(t, nil)
+	u, ctrl, _, mockacs, mockhttp := mocks(t, nil)
 	defer ctrl.Finish()
 
-	var writtenFile bytes.Buffer
+	defer mockOS()()
 	gomock.InOrder(
 		mockhttp.EXPECT().RoundTrip(mock_http.NewHTTPSimpleMatcher("GET", "https://s3.amazonaws.com/amazon-ecs-agent/update.tar")).Return(mock_http.SuccessResponse("update-tar-data"), nil),
-		mockfs.EXPECT().Create(gomock.Any()).Return(mock_os.NopReadWriteCloser(&writtenFile), nil),
-		mockfs.EXPECT().Remove(gomock.Any()),
 		mockacs.EXPECT().MakeRequest(&nackRequestMatcher{&ecsacs.NackRequest{
 			Cluster:           ptr("cluster").(*string),
 			ContainerInstance: ptr("containerInstance").(*string),

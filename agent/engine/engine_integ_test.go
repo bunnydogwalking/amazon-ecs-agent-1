@@ -1,5 +1,5 @@
 // +build integration
-// Copyright 2014-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -47,8 +47,6 @@ import (
 const (
 	testDockerStopTimeout  = 5 * time.Second
 	credentialsIDIntegTest = "credsid"
-	containerPortOne       = 24751
-	containerPortTwo       = 24752
 	serverContent          = "ecs test container"
 	dialTimeout            = 200 * time.Millisecond
 	localhost              = "127.0.0.1"
@@ -223,7 +221,7 @@ func TestHostVolumeMount(t *testing.T) {
 func TestSweepContainer(t *testing.T) {
 	cfg := defaultTestConfigIntegTest()
 	cfg.TaskCleanupWaitDuration = 1 * time.Minute
-	cfg.ContainerMetadataEnabled = true
+	cfg.ContainerMetadataEnabled = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 	taskEngine, done, _ := setup(cfg, nil, t)
 	defer done()
 
@@ -507,9 +505,11 @@ func TestLabels(t *testing.T) {
 	assert.EqualValues(t, "", state.Config.Labels["label1"])
 
 	// Kill the existing container now
-	taskUpdate := *testTask
+	// Create instead of copying the testTask, to avoid race condition.
+	// AddTask idempotently handles update, filtering by Task ARN.
+	taskUpdate := createTestTask(testArn)
 	taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
-	go taskEngine.AddTask(&taskUpdate)
+	go taskEngine.AddTask(taskUpdate)
 
 	verifyContainerStoppedStateChange(t, taskEngine)
 	verifyTaskStoppedStateChange(t, taskEngine)
@@ -552,9 +552,11 @@ func TestLogDriverOptions(t *testing.T) {
 	assert.EqualValues(t, containerExpected, state.HostConfig.LogConfig)
 
 	// Kill the existing container now
-	testUpdate := *testTask
-	testUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
-	go taskEngine.AddTask(&testUpdate)
+	// Create instead of copying the testTask, to avoid race condition.
+	// AddTask idempotently handles update, filtering by Task ARN.
+	taskUpdate := createTestTask(testArn)
+	taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
+	go taskEngine.AddTask(taskUpdate)
 
 	verifyContainerStoppedStateChange(t, taskEngine)
 	verifyTaskStoppedStateChange(t, taskEngine)
@@ -600,9 +602,11 @@ func testNetworkMode(t *testing.T, networkMode string) {
 	assert.Equal(t, networkMode, networks[0], "did not find the expected network mode")
 
 	// Kill the existing container now
-	taskUpdate := *testTask
+	// Create instead of copying the testTask, to avoid race condition.
+	// AddTask idempotently handles update, filtering by Task ARN.
+	taskUpdate := createTestTask(testArn)
 	taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
-	go taskEngine.AddTask(&taskUpdate)
+	go taskEngine.AddTask(taskUpdate)
 
 	verifyContainerStoppedStateChange(t, taskEngine)
 	verifyTaskStoppedStateChange(t, taskEngine)
@@ -633,9 +637,10 @@ func TestTaskCleanup(t *testing.T) {
 	_, err = client.ContainerInspect(ctx, cid)
 	assert.NoError(t, err, "Inspect should work")
 
-	testUpdate := *testTask
-	testUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
-	go taskEngine.AddTask(&testUpdate)
+	// Create instead of copying the testTask, to avoid race condition.
+	taskUpdate := createTestTask(testArn)
+	taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
+	go taskEngine.AddTask(taskUpdate)
 	verifyContainerStoppedStateChange(t, taskEngine)
 	verifyTaskStoppedStateChange(t, taskEngine)
 
