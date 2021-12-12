@@ -91,7 +91,7 @@ type Config struct {
 
 	// PollMetrics configures whether metrics are constantly streamed for each container or
 	// polled on interval instead.
-	PollMetrics BooleanDefaultTrue
+	PollMetrics BooleanDefaultFalse
 
 	// PollingMetricsWaitDuration configures how long a container should wait before polling metrics
 	// again when PollMetrics is set to true
@@ -112,8 +112,18 @@ type Config struct {
 	// ContainerStartTimeout specifies the amount of time to wait to start a container
 	ContainerStartTimeout time.Duration
 
+	// ContainerCreateTimeout specifies the amount of time to wait to create a container
+	ContainerCreateTimeout time.Duration
+
+	// DependentContainersPullUpfront specifies whether pulling images upfront should be applied to this agent.
+	// Default false
+	DependentContainersPullUpfront BooleanDefaultFalse
+
 	// ImagePullInactivityTimeout is here to override the amount of time to wait when pulling and extracting a container
 	ImagePullInactivityTimeout time.Duration
+
+	//ImagePullTimeout is here to override the timeout for PullImage API
+	ImagePullTimeout time.Duration
 
 	// AvailableLoggingDrivers specifies the logging drivers available for use
 	// with Docker.  If not set, it defaults to ["json-file","none"].
@@ -134,6 +144,12 @@ type Config struct {
 	// TaskCleanupWaitDuration specifies the time to wait after a task is stopped
 	// until cleanup of task resources is started.
 	TaskCleanupWaitDuration time.Duration
+
+	// TaskCleanupWaitDurationJitter specifies a jitter for task cleanup wait duration.
+	// When specified to a non-zero duration (default is zero), the task cleanup wait duration for each task
+	// will be a random duration between [TaskCleanupWaitDuration, TaskCleanupWaitDuration +
+	// TaskCleanupWaitDurationJitter].
+	TaskCleanupWaitDurationJitter time.Duration
 
 	// TaskIAMRoleEnabled specifies if the Agent is capable of launching
 	// tasks with IAM Roles.
@@ -315,4 +331,27 @@ type Config struct {
 
 	// VolumePluginCapabilities specifies the capabilities of the ecs volume plugin.
 	VolumePluginCapabilities []string
+
+	// FSxWindowsFileServerCapable is the config option to indicate if fsxWindowsFileServer is supported.
+	// It should be enabled by default only if the container instance is part of a valid active directory domain.
+	FSxWindowsFileServerCapable bool
+
+	// External specifies whether agent is running on external compute capacity (i.e. outside of aws).
+	External BooleanDefaultFalse
+
+	// InstanceENIDNSServerList stores the list of DNS servers for the primary instance ENI.
+	// Currently, this field is only populated for Windows and is used during task networking setup.
+	InstanceENIDNSServerList []string
+
+	// RuntimeStatsLogFile stores the path where the golang runtime stats are periodically logged
+	RuntimeStatsLogFile string
+
+	// EnableRuntimeStats specifies if pprof should be enabled through the agent introspection port. By default, this configuration
+	// is set to false and can be overridden by means of the ECS_ENABLE_RUNTIME_STATS environment variable.
+	EnableRuntimeStats BooleanDefaultFalse
+
+	// ShouldExcludeIPv6PortBinding specifies whether agent should exclude IPv6 port bindings reported from docker. This configuration
+	// is set to true by default, and can be overridden by the ECS_EXCLUDE_IPV6_PORTBINDING environment variable. This is a workaround
+	// for docker's bug as detailed in https://github.com/aws/amazon-ecs-agent/issues/2870.
+	ShouldExcludeIPv6PortBinding BooleanDefaultTrue
 }

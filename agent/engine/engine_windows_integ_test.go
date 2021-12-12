@@ -1,4 +1,4 @@
-// +build windows,integration
+//go:build windows && integration
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -20,13 +20,19 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
+
+	"github.com/cihub/seelog"
+
+	"github.com/docker/docker/api/types"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
@@ -41,6 +47,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/sdkclientfactory"
 	"github.com/aws/amazon-ecs-agent/agent/ec2"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
+	"github.com/aws/amazon-ecs-agent/agent/engine/execcmd"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	s3factory "github.com/aws/amazon-ecs-agent/agent/s3/factory"
 	ssmfactory "github.com/aws/amazon-ecs-agent/agent/ssm/factory"
@@ -54,11 +61,13 @@ import (
 )
 
 const (
-	dockerEndpoint              = "npipe:////./pipe/docker_engine"
-	testVolumeImage             = "amazon/amazon-ecs-volumes-test:make"
-	testRegistryImage           = "amazon/amazon-ecs-netkitten:make"
-	testBaseImage               = "amazon-ecs-ftest-windows-base:make"
-	dockerVolumeDirectoryFormat = "c:\\ProgramData\\docker\\volumes\\%s\\_data"
+	dockerEndpoint               = "npipe:////./pipe/docker_engine"
+	testVolumeImage              = "amazon/amazon-ecs-volumes-test:make"
+	testRegistryImage            = "amazon/amazon-ecs-netkitten:make"
+	testExecCommandAgentImage    = "amazon/amazon-ecs-exec-command-agent-windows-test:make"
+	testBaseImage                = "amazon-ecs-ftest-windows-base:make"
+	dockerVolumeDirectoryFormat  = "c:\\ProgramData\\docker\\volumes\\%s\\_data"
+	testExecCommandAgentSleepBin = "c:\\sleep.exe"
 )
 
 var endpoint = utils.DefaultIfBlank(os.Getenv(DockerEndpointEnvVariable), dockerEndpoint)
@@ -264,264 +273,6 @@ func TestStartStopUnpulledImageDigest(t *testing.T) {
 
 	event = <-stateChangeEvents
 	assert.Equal(t, event.(api.TaskStateChange).Status, apitaskstatus.TaskStopped, "Expected task to be STOPPED")
-}
-
-// TestPortForward runs a container serving data on the randomly chosen port
-// 24751 and verifies that when you do forward the port you can access it and if
-// you don't forward the port you can't
-func TestPortForward(t *testing.T) {
-	taskEngine, done, _ := setupWithDefaultConfig(t)
-	defer done()
-
-	stateChangeEvents := taskEngine.StateChangeEvents()
-	client, _ := sdkClient.NewClientWithOpts(sdkClient.WithHost(endpoint), sdkClient.WithVersion(sdkclientfactory.GetDefaultVersion().String()))
-
-	testArn := "testPortForwardFail"
-	testTask := createTestTask(testArn)
-	testTask.Containers[0].Image = testRegistryImage
-	port := getUnassignedPort()
-	testTask.Containers[0].Command = []string{fmt.Sprintf("-l=%d", port), "-serve", serverContent}
-
-	// Port not forwarded; verify we can't access it
-	go taskEngine.AddTask(testTask)
-
-	err := verifyTaskIsRunning(stateChangeEvents, testTask)
-	require.NoError(t, err)
-	containerMap, _ := taskEngine.(*DockerTaskEngine).state.ContainerMapByArn(testTask.Arn)
-	cid := containerMap[testTask.Containers[0].Name].DockerID
-
-	cip, err := getContainerIP(client, cid)
-	require.NoError(t, err, "failed to acquire container ip from docker")
-
-	time.Sleep(waitForDockerDuration) // wait for Docker
-	_, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", cip, port), dialTimeout)
-	assert.Error(t, err, "Did not expect to be able to dial port %d but didn't get error", port)
-
-	ctx, cancel := context.WithCancel(context.TODO())
-	defer cancel()
-
-	// Kill the existing container now to make the test run more quickly.
-	err = client.ContainerKill(ctx, cid, "SIGKILL")
-	assert.NoError(t, err, "Could not kill container")
-
-	verifyTaskIsStopped(stateChangeEvents, testTask)
-
-	// Now forward it and make sure that works
-	testArn = "testPortForwardWorking"
-	testTask = createTestTask(testArn)
-	testTask.Containers[0].Image = testRegistryImage
-	port = getUnassignedPort()
-	testTask.Containers[0].Command = []string{fmt.Sprintf("-l=%d", port), "-serve", serverContent}
-	testTask.Containers[0].Ports = []apicontainer.PortBinding{{ContainerPort: port, HostPort: port}}
-
-	taskEngine.AddTask(testTask)
-
-	err = verifyTaskIsRunning(stateChangeEvents, testTask)
-	require.NoError(t, err)
-
-	containerMap, _ = taskEngine.(*DockerTaskEngine).state.ContainerMapByArn(testTask.Arn)
-	cid = containerMap[testTask.Containers[0].Name].DockerID
-	cip, err = getContainerIP(client, cid)
-	require.NoError(t, err, "failed to acquire container ip from docker")
-
-	time.Sleep(waitForDockerDuration) // wait for Docker
-	conn, err := dialWithRetries("tcp", fmt.Sprintf("%s:%d", cip, port), 10, dialTimeout)
-	require.NoError(t, err, "error dialing simple container ")
-
-	var response []byte
-	for i := 0; i < 10; i++ {
-		response, err = ioutil.ReadAll(conn)
-		assert.NoError(t, err, "error reading response")
-		if len(response) > 0 {
-			break
-		}
-		// Retry for a non-blank response. The container in docker 1.7+ sometimes
-		// isn't up quickly enough and we get a blank response. It's still unclear
-		// to me if this is a docker bug or netkitten bug
-		t.Log("Retrying getting response from container; got nothing")
-		time.Sleep(100 * time.Millisecond)
-	}
-	assert.Equal(t, string(response), serverContent, "got response: "+string(response)+" instead of ", serverContent)
-
-	// Stop the existing container now
-	taskUpdate := createTestTask(testArn)
-	taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
-	go taskEngine.AddTask(taskUpdate)
-	verifyTaskIsStopped(stateChangeEvents, testTask)
-}
-
-// TestMultiplePortForwards tests that two ldockinks containers in the same task can
-// both expose ports successfully
-func TestMultiplePortForwards(t *testing.T) {
-	taskEngine, done, _ := setupWithDefaultConfig(t)
-	defer done()
-
-	stateChangeEvents := taskEngine.StateChangeEvents()
-	client, _ := sdkClient.NewClientWithOpts(sdkClient.WithHost(endpoint), sdkClient.WithVersion(sdkclientfactory.GetDefaultVersion().String()))
-
-	// Forward it and make sure that works
-	testArn := "testMultiplePortForwards"
-	testTask := createTestTask(testArn)
-	port1 := getUnassignedPort()
-	port2 := getUnassignedPort()
-	testTask.Containers[0].Image = testRegistryImage
-	testTask.Containers[0].Command = []string{fmt.Sprintf("-l=%d", port1), "-serve", serverContent + "1"}
-	testTask.Containers[0].Ports = []apicontainer.PortBinding{{ContainerPort: port1, HostPort: port1}}
-	testTask.Containers[0].Essential = false
-	testTask.Containers = append(testTask.Containers, createTestContainer())
-	testTask.Containers[1].Name = "nc2"
-	testTask.Containers[1].Image = testRegistryImage
-	testTask.Containers[1].Command = []string{fmt.Sprintf("-l=%d", port1), "-serve", serverContent + "2"}
-	testTask.Containers[1].Ports = []apicontainer.PortBinding{{ContainerPort: port1, HostPort: port2}}
-
-	go taskEngine.AddTask(testTask)
-
-	err := verifyTaskIsRunning(stateChangeEvents, testTask)
-	require.NoError(t, err)
-
-	containerMap, _ := taskEngine.(*DockerTaskEngine).state.ContainerMapByArn(testTask.Arn)
-	cid1 := containerMap[testTask.Containers[0].Name].DockerID
-	cid2 := containerMap[testTask.Containers[1].Name].DockerID
-
-	cip1, err := getContainerIP(client, cid1)
-	require.NoError(t, err, "failed to acquire the container ip from docker")
-	cip2, err := getContainerIP(client, cid2)
-	require.NoError(t, err, "failed to acquire the container ip from docker")
-
-	time.Sleep(waitForDockerDuration) // wait for Docker
-	conn, err := dialWithRetries("tcp", fmt.Sprintf("%s:%d", cip1, port1), 10, dialTimeout)
-	require.NoError(t, err, "error dialing simple container 1 ")
-	t.Log("Dialed first container")
-	response, _ := ioutil.ReadAll(conn)
-	assert.Equal(t, string(response), serverContent+"1", "got response: "+string(response)+" instead of "+serverContent+"1")
-
-	t.Log("Read first container")
-	conn, err = dialWithRetries("tcp", fmt.Sprintf("%s:%d", cip2, port1), 10, dialTimeout)
-	require.NoError(t, err, "error dialing simple container 2")
-	t.Log("Dialed second container")
-	response, _ = ioutil.ReadAll(conn)
-	assert.Equal(t, string(response), serverContent+"2", "got response: "+string(response)+" instead of "+serverContent+"2")
-	t.Log("Read second container")
-
-	taskUpdate := createTestTask(testArn)
-	taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
-	go taskEngine.AddTask(taskUpdate)
-	verifyTaskIsStopped(stateChangeEvents, testTask)
-}
-
-// TestDynamicPortForward runs a container serving data on a port chosen by the
-// docker deamon and verifies that the port is reported in the state-change
-func TestDynamicPortForward(t *testing.T) {
-	taskEngine, done, _ := setupWithDefaultConfig(t)
-	defer done()
-
-	stateChangeEvents := taskEngine.StateChangeEvents()
-
-	testArn := "testDynamicPortForward"
-	testTask := createTestTask(testArn)
-	testTask.Containers[0].Image = testRegistryImage
-	port := getUnassignedPort()
-	testTask.Containers[0].Command = []string{fmt.Sprintf("-l=%d", port), "-serve", serverContent}
-	// No HostPort = docker should pick
-	testTask.Containers[0].Ports = []apicontainer.PortBinding{{ContainerPort: port}}
-
-	go taskEngine.AddTask(testTask)
-
-	event := <-stateChangeEvents
-	assert.Equal(t, event.(api.ContainerStateChange).Status, apicontainerstatus.ContainerRunning, "Expected container to be RUNNING")
-
-	portBindings := event.(api.ContainerStateChange).PortBindings
-
-	event = <-stateChangeEvents
-	assert.Equal(t, event.(api.TaskStateChange).Status, apitaskstatus.TaskRunning, "Expected task to be RUNNING")
-
-	assert.Len(t, portBindings, 1, "portBindings was not set; should have been len 1")
-
-	var bindingFor24751 uint16
-	for _, binding := range portBindings {
-		if binding.ContainerPort == port {
-			bindingFor24751 = binding.HostPort
-		}
-	}
-	assert.NotEqual(t, bindingFor24751, 0, "could not find the port mapping for %d", port)
-
-	client, _ := sdkClient.NewClientWithOpts(sdkClient.WithHost(endpoint), sdkClient.WithVersion(sdkclientfactory.GetDefaultVersion().String()))
-	containerMap, _ := taskEngine.(*DockerTaskEngine).state.ContainerMapByArn(testTask.Arn)
-	cid := containerMap[testTask.Containers[0].Name].DockerID
-	cip, err := getContainerIP(client, cid)
-	assert.NoError(t, err)
-
-	time.Sleep(waitForDockerDuration) // wait for Docker
-	conn, err := dialWithRetries("tcp", cip+fmt.Sprintf(":%d", port), 10, dialTimeout)
-	require.NoError(t, err, "error dialing simple container")
-
-	response, _ := ioutil.ReadAll(conn)
-	assert.Equal(t, string(response), serverContent, "got response: "+string(response)+" instead of %s", serverContent)
-
-	// Kill the existing container now
-	taskUpdate := createTestTask(testArn)
-	taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
-	go taskEngine.AddTask(taskUpdate)
-	verifyTaskIsStopped(stateChangeEvents, testTask)
-}
-
-func TestMultipleDynamicPortForward(t *testing.T) {
-	taskEngine, done, _ := setupWithDefaultConfig(t)
-	defer done()
-
-	stateChangeEvents := taskEngine.StateChangeEvents()
-
-	testArn := "testDynamicPortForward2"
-	testTask := createTestTask(testArn)
-	testTask.Containers[0].Image = testRegistryImage
-	port := getUnassignedPort()
-	testTask.Containers[0].Command = []string{fmt.Sprintf("-l=%d", port), "-serve", serverContent, `-loop`}
-	// No HostPort or 0 hostport; docker should pick two ports for us
-	testTask.Containers[0].Ports = []apicontainer.PortBinding{{ContainerPort: port}, {ContainerPort: port, HostPort: 0}}
-
-	go taskEngine.AddTask(testTask)
-
-	event := <-stateChangeEvents
-	assert.Equal(t, event.(api.ContainerStateChange).Status, apicontainerstatus.ContainerRunning, "Expected container to be RUNNING")
-
-	portBindings := event.(api.ContainerStateChange).PortBindings
-
-	event = <-stateChangeEvents
-	assert.Equal(t, event.(api.TaskStateChange).Status, apitaskstatus.TaskRunning, "Expected task to be RUNNING")
-
-	assert.Len(t, portBindings, 2, "could not bind to two ports from one container port", portBindings)
-	var bindingFor24751_1 uint16
-	var bindingFor24751_2 uint16
-	for _, binding := range portBindings {
-		if binding.ContainerPort == port {
-			if bindingFor24751_1 == 0 {
-				bindingFor24751_1 = binding.HostPort
-			} else {
-				bindingFor24751_2 = binding.HostPort
-			}
-		}
-	}
-	assert.NotZero(t, bindingFor24751_1, "could not find the port mapping for ", port)
-	assert.NotZero(t, bindingFor24751_2, "could not find the port mapping for ", port)
-
-	client, _ := sdkClient.NewClientWithOpts(sdkClient.WithHost(endpoint), sdkClient.WithVersion(sdkclientfactory.GetDefaultVersion().String()))
-	containerMap, _ := taskEngine.(*DockerTaskEngine).state.ContainerMapByArn(testTask.Arn)
-	cid := containerMap[testTask.Containers[0].Name].DockerID
-	cip, err := getContainerIP(client, cid)
-	assert.NoError(t, err)
-
-	time.Sleep(waitForDockerDuration) // wait for Docker
-	conn, err := dialWithRetries("tcp", fmt.Sprintf("%s:%d", cip, port), 10, dialTimeout)
-	require.NoError(t, err, "error dialing simple container")
-
-	response, _ := ioutil.ReadAll(conn)
-	assert.Equal(t, string(response), serverContent, "got response: "+string(response)+" instead of %s", serverContent)
-
-	// Kill the existing container now
-	taskUpdate := createTestTask(testArn)
-	taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
-	go taskEngine.AddTask(taskUpdate)
-	verifyTaskIsStopped(stateChangeEvents, testTask)
 }
 
 func TestVolumesFrom(t *testing.T) {
@@ -743,7 +494,8 @@ func setupGMSA(cfg *config.Config, state dockerstate.TaskEngineState, t *testing
 	}
 
 	taskEngine := NewDockerTaskEngine(cfg, dockerClient, credentialsManager,
-		eventstream.NewEventStream("ENGINEINTEGTEST", context.Background()), imageManager, state, metadataManager, resourceFields)
+		eventstream.NewEventStream("ENGINEINTEGTEST", context.Background()), imageManager, state, metadataManager,
+		resourceFields, execcmd.NewManager())
 	taskEngine.MustInit(context.TODO())
 	return taskEngine, func() {
 		taskEngine.Shutdown()
@@ -763,4 +515,380 @@ func verifyContainerCredentialSpec(client *sdkClient.Client, id, credentialspecO
 	}
 
 	return errors.New("unable to obtain credentialspec")
+}
+
+// This setup for execcmd is same as Linux, just implemented different
+// TestExecCommandAgent validates ExecCommandAgent start and monitor processes. The algorithm to test is as follows:
+// 1. Pre-setup: the build file in ../../misc/exec-command-agent-windows-test will create a special docker sleeper image
+// based on a base windows 2019 image. This image simulates a ecs windows image and contains a pre-baked C:\sleep.exe binary.
+// /sleep is the main process used to launch the test container; Then use the windows "taskkill /f /im amazon-ssm-agent.exe" to
+// kill the running agent process in the container
+// The build file will also create a fake amazon-ssm-agent which is a go program that only sleeps for a certain time specified.
+//
+// 2. Setup: Create a new docker task engine with a modified path pointing to our fake amazon-ssm-agent binary
+// 3. Create and start our test task using our test image
+// 4. Wait for the task to start and verify that the expected ExecCommandAgent bind mounts are present in the containers
+// 5. Verify that our fake amazon-ssm-agent was started inside the container using docker top, and retrieve its PID
+// 6. Kill the fake amazon-ssm-agent using the command in step 1
+// 7. Verify that the engine restarted our fake amazon-ssm-agent by doing docker top one more time (a new PID should popup)
+func TestExecCommandAgent(t *testing.T) {
+	// the execcmd feature is not supported for Win2016
+	if windows2016, _ := config.IsWindows2016(); windows2016 {
+		return
+	}
+	const (
+		testTaskId        = "exec-command-agent-test-task"
+		testContainerName = "exec-command-agent-test-container"
+		sleepFor          = time.Minute * 2
+	)
+
+	client, err := sdkClient.NewClientWithOpts(sdkClient.WithHost(endpoint), sdkClient.WithVersion(sdkclientfactory.GetDefaultVersion().String()))
+	require.NoError(t, err, "Creating go docker client failed")
+
+	testExecCmdHostBinDir := "C:\\Program Files\\Amazon\\ECS\\managed-agents\\execute-command\\bin"
+
+	taskEngine, done, _ := setupEngineForExecCommandAgent(t, testExecCmdHostBinDir)
+	stateChangeEvents := taskEngine.StateChangeEvents()
+	defer done()
+
+	testTask := createTestExecCommandAgentTask(testTaskId, testContainerName, sleepFor)
+	execAgentLogPath := filepath.Join("C:\\ProgramData\\Amazon\\ECS\\exec", testTaskId)
+	err = os.MkdirAll(execAgentLogPath, 0644)
+	require.NoError(t, err, "error creating execAgent log file")
+	_, err = os.Stat(execAgentLogPath)
+	require.NoError(t, err, "execAgent log dir doesn't exist")
+	err = os.MkdirAll(execcmd.ECSAgentExecConfigDir, 0644)
+	require.NoError(t, err, "error creating execAgent config dir")
+
+	go taskEngine.AddTask(testTask)
+
+	verifyContainerRunningStateChange(t, taskEngine)
+	verifyTaskRunningStateChange(t, taskEngine)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+
+	containerMap, _ := taskEngine.(*DockerTaskEngine).state.ContainerMapByArn(testTask.Arn)
+	cid := containerMap[testTask.Containers[0].Name].DockerID
+
+	// session limit is 2
+	testconfigDirName, _ := execcmd.GetExecAgentConfigDir(2)
+
+	// todo: change to file contents passed in
+	verifyExecCmdAgentExpectedMounts(t, ctx, client, testTaskId, cid, testContainerName, testExecCmdHostBinDir+"\\1.0.0.0", testconfigDirName)
+	pidA := verifyMockExecCommandAgentIsRunning(t, client, cid)
+	seelog.Infof("Verified mock ExecCommandAgent is running (pidA=%s)", pidA)
+	killMockExecCommandAgent(t, client, cid)
+	seelog.Infof("kill signal sent to ExecCommandAgent (pidA=%s)", pidA)
+	verifyMockExecCommandAgentIsStopped(t, client, cid, pidA)
+	seelog.Infof("Verified mock ExecCommandAgent was killed (pidA=%s)", pidA)
+	pidB := verifyMockExecCommandAgentIsRunning(t, client, cid)
+	seelog.Infof("Verified mock ExecCommandAgent was restarted (pidB=%s)", pidB)
+	require.NotEqual(t, pidA, pidB, "ExecCommandAgent PID did not change after restart")
+
+	taskUpdate := createTestExecCommandAgentTask(testTaskId, testContainerName, sleepFor)
+	taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
+	go taskEngine.AddTask(taskUpdate)
+
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second*20)
+	go func() {
+		verifyTaskIsStopped(stateChangeEvents, testTask)
+		cancel()
+	}()
+
+	<-ctx.Done()
+	require.NotEqual(t, context.DeadlineExceeded, ctx.Err(), "Timed out waiting for task (%s) to stop", testTaskId)
+	assert.NotNil(t, testTask.Containers[0].GetKnownExitCode(), "No exit code found")
+	// TODO: [ecs-exec] We should be able to wait for cleanup instead of calling deleteTask directly
+	taskEngine.(*DockerTaskEngine).deleteTask(testTask)
+	_, err = os.Stat(execAgentLogPath)
+	assert.True(t, os.IsNotExist(err), "execAgent log cleanup failed")
+	os.RemoveAll(execcmd.ECSAgentExecConfigDir)
+}
+
+// TestManagedAgentEvent validates the emitted container events for a started and a stopped managed agent.
+func TestManagedAgentEvent(t *testing.T) {
+	// the execcmd feature is not supported for Win2016
+	if windows2016, _ := config.IsWindows2016(); windows2016 {
+		return
+	}
+	testcases := []struct {
+		Name                 string
+		ExpectedStatus       apicontainerstatus.ManagedAgentStatus
+		ManagedAgentLifetime time.Duration
+		ShouldBeRunning      bool
+	}{
+		{
+			Name:                 "Confirmed emit RUNNING event",
+			ExpectedStatus:       apicontainerstatus.ManagedAgentRunning,
+			ManagedAgentLifetime: 1,
+			ShouldBeRunning:      true,
+		},
+		{
+			Name:                 "Confirmed emit STOPPED event",
+			ExpectedStatus:       apicontainerstatus.ManagedAgentStopped,
+			ManagedAgentLifetime: 0,
+			ShouldBeRunning:      false,
+		},
+	}
+	for _, tc := range testcases {
+		t.Run(tc.Name, func(t *testing.T) {
+
+			const (
+				testTaskId        = "exec-command-agent-test-task"
+				testContainerName = "exec-command-agent-test-container"
+			)
+
+			client, err := sdkClient.NewClientWithOpts(sdkClient.WithHost(endpoint), sdkClient.WithVersion(sdkclientfactory.GetDefaultVersion().String()))
+			require.NoError(t, err, "Creating go docker client failed")
+
+			testExecCmdHostBinDir := "C:\\Program Files\\Amazon\\ECS\\managed-agents\\execute-command\\bin"
+
+			taskEngine, done, _ := setupEngineForExecCommandAgent(t, testExecCmdHostBinDir)
+			defer done()
+
+			testTask := createTestExecCommandAgentTask(testTaskId, testContainerName, time.Minute*tc.ManagedAgentLifetime)
+			execAgentLogPath := filepath.Join("C:\\ProgramData\\Amazon\\ECS\\exec", testTaskId)
+			err = os.MkdirAll(execAgentLogPath, 0644)
+			require.NoError(t, err, "error creating execAgent log file")
+			_, err = os.Stat(execAgentLogPath)
+			require.NoError(t, err, "execAgent log dir doesn't exist")
+			err = os.MkdirAll(execcmd.ECSAgentExecConfigDir, 0644)
+			require.NoError(t, err, "error creating execAgent config dir")
+
+			go taskEngine.AddTask(testTask)
+
+			verifyContainerRunningStateChange(t, taskEngine)
+			verifyTaskRunningStateChange(t, taskEngine)
+
+			if tc.ShouldBeRunning {
+				containerMap, _ := taskEngine.(*DockerTaskEngine).state.ContainerMapByArn(testTask.Arn)
+				cid := containerMap[testTask.Containers[0].Name].DockerID
+				verifyMockExecCommandAgentIsRunning(t, client, cid)
+			}
+			waitDone := make(chan struct{})
+
+			go verifyExecAgentStateChange(t, taskEngine, tc.ExpectedStatus, waitDone)
+
+			timeout := false
+			select {
+			case <-waitDone:
+			case <-time.After(20 * time.Second):
+				timeout = true
+			}
+			assert.False(t, timeout)
+
+			if tc.ShouldBeRunning {
+				stateChangeEvents := taskEngine.StateChangeEvents()
+				taskUpdate := createTestExecCommandAgentTask(testTaskId, testContainerName, time.Minute*tc.ManagedAgentLifetime)
+				taskUpdate.SetDesiredStatus(apitaskstatus.TaskStopped)
+				go taskEngine.AddTask(taskUpdate)
+
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
+				go func() {
+					verifyTaskIsStopped(stateChangeEvents, testTask)
+					cancel()
+				}()
+
+				<-ctx.Done()
+				require.NotEqual(t, context.DeadlineExceeded, ctx.Err(), "Timed out waiting for task (%s) to stop", testTaskId)
+				assert.NotNil(t, testTask.Containers[0].GetKnownExitCode(), "No exit code found")
+			}
+
+			taskEngine.(*DockerTaskEngine).deleteTask(testTask)
+			_, err = os.Stat(execAgentLogPath)
+			assert.True(t, os.IsNotExist(err), "execAgent log cleanup failed")
+			os.RemoveAll(execcmd.ECSAgentExecConfigDir)
+		})
+	}
+}
+
+func createTestExecCommandAgentTask(taskId, containerName string, sleepFor time.Duration) *apitask.Task {
+	testTask := createTestTask("arn:aws:ecs:us-west-2:1234567890:task/" + taskId)
+	testTask.PIDMode = ecs.PidModeHost
+	testTask.Containers[0].Name = containerName
+	testTask.Containers[0].Image = testExecCommandAgentImage
+	testTask.Containers[0].Command = []string{testExecCommandAgentSleepBin, "-time=" + sleepFor.String()}
+	enableExecCommandAgentForContainer(testTask.Containers[0], apicontainer.ManagedAgentState{})
+	return testTask
+}
+
+// setupEngineForExecCommandAgent creates a new TaskEngine with a custom execcmd.Manager that will attempt to read the
+// host binaries from the directory passed as parameter (as opposed to the default directory).
+// Additionally, it overrides the engine's monitorExecAgentsInterval to one second.
+func setupEngineForExecCommandAgent(t *testing.T, hostBinDir string) (TaskEngine, func(), credentials.Manager) {
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+
+	skipIntegTestIfApplicable(t)
+
+	cfg := defaultTestConfigIntegTest()
+	sdkClientFactory := sdkclientfactory.NewFactory(ctx, dockerEndpoint)
+	dockerClient, err := dockerapi.NewDockerGoClient(sdkClientFactory, cfg, context.Background())
+	if err != nil {
+		t.Fatalf("Error creating Docker client: %v", err)
+	}
+	credentialsManager := credentials.NewManager()
+	state := dockerstate.NewTaskEngineState()
+	imageManager := NewImageManager(cfg, dockerClient, state)
+	imageManager.SetDataClient(data.NewNoopClient())
+	metadataManager := containermetadata.NewManager(dockerClient, cfg)
+	execCmdMgr := execcmd.NewManagerWithBinDir(hostBinDir)
+
+	taskEngine := NewDockerTaskEngine(cfg, dockerClient, credentialsManager,
+		eventstream.NewEventStream("ENGINEINTEGTEST", context.Background()), imageManager, state, metadataManager,
+		nil, execCmdMgr)
+	taskEngine.monitorExecAgentsInterval = time.Second
+	taskEngine.MustInit(context.TODO())
+	return taskEngine, func() {
+		taskEngine.Shutdown()
+	}, credentialsManager
+}
+
+var (
+	containerDepsDir = execcmd.ContainerDepsFolder
+)
+
+func verifyExecCmdAgentExpectedMounts(t *testing.T,
+	ctx context.Context,
+	client *sdkClient.Client,
+	testTaskId, containerId, containerName, testExecCmdHostVersionedBinDir, testconfigDirName string) {
+	inspectState, _ := client.ContainerInspect(ctx, containerId)
+
+	// The dockerclient only gives back lowercase paths in Windows
+	expectedMounts := []struct {
+		source    string
+		destRegex string
+		readOnly  bool
+	}{
+		{
+			source:    strings.ToLower(testExecCmdHostVersionedBinDir),
+			destRegex: strings.ToLower(containerDepsDir),
+			readOnly:  true,
+		},
+		{
+			source:    strings.ToLower(filepath.Join(execcmd.HostExecConfigDir, testconfigDirName)),
+			destRegex: strings.ToLower(filepath.Join(containerDepsDir, "configuration")),
+			readOnly:  true,
+		},
+		{
+			source:    strings.ToLower(filepath.Join(execcmd.HostLogDir, testTaskId, containerName)),
+			destRegex: strings.ToLower(execcmd.ContainerLogDir),
+			readOnly:  false,
+		},
+		{
+			source:    strings.ToLower(execcmd.SSMPluginDir),
+			destRegex: strings.ToLower(execcmd.SSMPluginDir),
+			readOnly:  true,
+		},
+	}
+
+	for _, em := range expectedMounts {
+		var found *types.MountPoint
+		for _, m := range inspectState.Mounts {
+			if m.Source == em.source {
+				found = &m
+				break
+			}
+		}
+		require.NotNil(t, found, "Expected mount point not found (%s)", em.source)
+		require.Equal(t, em.destRegex, found.Destination, "Destination for mount point (%s) is invalid expected: %s, actual: %s", em.source, em.destRegex, found.Destination)
+		if em.readOnly {
+			require.False(t, found.RW, found.Mode, "Destination for mount point (%s) should be read only", em.source)
+		} else {
+			require.True(t, found.RW, "Destination for mount point (%s) should be writable", em.source)
+		}
+		require.Equal(t, "bind", string(found.Type), "Destination for mount point (%s) is not of type bind", em.source)
+	}
+
+	require.Equal(t, len(expectedMounts), len(inspectState.Mounts), "Wrong number of bind mounts detected in container (%s)", containerName)
+}
+
+func verifyMockExecCommandAgentIsRunning(t *testing.T, client *sdkClient.Client, containerId string) string {
+	return verifyMockExecCommandAgentStatus(t, client, containerId, "", true)
+}
+
+func verifyMockExecCommandAgentIsStopped(t *testing.T, client *sdkClient.Client, containerId, pid string) {
+	verifyMockExecCommandAgentStatus(t, client, containerId, pid, false)
+}
+
+func verifyMockExecCommandAgentStatus(t *testing.T, client *sdkClient.Client, containerId, expectedPid string, checkIsRunning bool) string {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
+	defer cancel()
+	res := make(chan string, 1)
+	execCmdAgentProcessRegex := execcmd.SSMAgentBinName
+	go func() {
+		for {
+			top, err := client.ContainerTop(ctx, containerId, nil)
+			if err != nil {
+				continue
+			}
+			cmdPos := -1
+			pidPos := -1
+			for i, t := range top.Titles {
+				if strings.ToUpper(t) == "NAME" {
+					cmdPos = i
+				}
+				if strings.ToUpper(t) == "PID" {
+					pidPos = i
+				}
+
+			}
+			require.NotEqual(t, -1, cmdPos, "NAME title not found in the container top response")
+			require.NotEqual(t, -1, pidPos, "PID title not found in the container top response")
+			for _, proc := range top.Processes {
+				matched, _ := regexp.MatchString(execCmdAgentProcessRegex, proc[cmdPos])
+				if matched {
+					res <- proc[pidPos]
+					return
+				}
+			}
+			seelog.Infof("Processes running in container: %s", top.Processes)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second * 4):
+			}
+		}
+	}()
+
+	var (
+		isRunning bool
+		pid       string
+	)
+	select {
+	case <-ctx.Done():
+	case r := <-res:
+		if r != "" {
+			pid = r
+			isRunning = true
+			if expectedPid != "" && pid != expectedPid {
+				isRunning = false
+			}
+		}
+
+	}
+	require.Equal(t, checkIsRunning, isRunning, "SSM agent was not found in container's process list")
+	return pid
+}
+
+func killMockExecCommandAgent(t *testing.T, client *sdkClient.Client, containerId string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+	// this is the same user used to start the execcmd agent (ssm agent)
+	containerNTUser := "NT AUTHORITY\\SYSTEM"
+	create, err := client.ContainerExecCreate(ctx, containerId, types.ExecConfig{
+		User:   containerNTUser,
+		Detach: true,
+		Cmd:    []string{"cmd", "/C", "taskkill /F /IM amazon-ssm-agent.exe"},
+	})
+	require.NoError(t, err)
+
+	err = client.ContainerExecStart(ctx, create.ID, types.ExecStartCheck{
+		Detach: true,
+	})
+	require.NoError(t, err)
+
+	// Windows docker exec takes longer than Linux
+	time.Sleep(4 * time.Second)
 }

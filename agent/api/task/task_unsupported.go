@@ -1,4 +1,4 @@
-// +build !linux,!windows
+//go:build !linux && !windows
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -17,6 +17,8 @@ package task
 
 import (
 	"time"
+
+	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
@@ -38,8 +40,6 @@ func (task *Task) adjustForPlatform(cfg *config.Config) {
 	defer task.lock.Unlock()
 	task.MemoryCPULimitsEnabled = cfg.TaskCPUMemLimit.Enabled()
 }
-
-func getCanonicalPath(path string) string { return path }
 
 func (task *Task) initializeCgroupResourceSpec(cgroupPath string, cGroupCPUPeriod time.Duration, resourceFields *taskresource.ResourceFields) error {
 	return nil
@@ -75,4 +75,26 @@ func (task *Task) initializeCredentialSpecResource(config *config.Config, creden
 // GetCredentialSpecResource retrieves credentialspec resource from resource map
 func (task *Task) GetCredentialSpecResource() ([]taskresource.TaskResource, bool) {
 	return []taskresource.TaskResource{}, false
+}
+
+func enableIPv6SysctlSetting(hostConfig *dockercontainer.HostConfig) {
+	return
+}
+
+// requiresFSxWindowsFileServerResource returns true if at least one volume in the task
+// is of type 'fsxWindowsFileServer'
+func (task *Task) requiresFSxWindowsFileServerResource() bool {
+	return false
+}
+
+// initializeFSxWindowsFileServerResource builds the resource dependency map for the fsxwindowsfileserver resource
+func (task *Task) initializeFSxWindowsFileServerResource(cfg *config.Config, credentialsManager credentials.Manager,
+	resourceFields *taskresource.ResourceFields) error {
+	return errors.New("task with FSx for Windows File Server volumes is only supported on Windows container instance")
+}
+
+// BuildCNIConfig builds the configuration for the CNI plugins
+// On unsupported platforms, we will not support this functionality
+func (task *Task) BuildCNIConfig(includeIPAMConfig bool, cniConfig *ecscni.Config) (*ecscni.Config, error) {
+	return nil, errors.New("unsupported platform")
 }

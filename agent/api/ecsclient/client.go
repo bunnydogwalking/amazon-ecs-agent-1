@@ -44,6 +44,9 @@ const (
 	pollEndpointCacheTTL    = 20 * time.Minute
 	roundtripTimeout        = 5 * time.Second
 	azAttrName              = "ecs.availability-zone"
+	cpuArchAttrName         = "ecs.cpu-architecture"
+	osTypeAttrName          = "ecs.os-type"
+	osFamilyAttrName        = "ecs.os-family"
 )
 
 // APIECSClient implements ECSClient
@@ -325,12 +328,25 @@ func validateRegisteredAttributes(expectedAttributes, actualAttributes []*ecs.At
 }
 
 func (client *APIECSClient) getAdditionalAttributes() []*ecs.Attribute {
-	return []*ecs.Attribute{
+	attrs := []*ecs.Attribute{
 		{
-			Name:  aws.String("ecs.os-type"),
+			Name:  aws.String(osTypeAttrName),
 			Value: aws.String(config.OSType),
 		},
+		{
+			Name:  aws.String(osFamilyAttrName),
+			Value: aws.String(config.GetOSFamily()),
+		},
 	}
+	// Send cpu arch attribute directly when running on external capacity. When running on EC2, this is not needed
+	// since the cpu arch is reported via instance identity doc in that case.
+	if client.config.External.Enabled() {
+		attrs = append(attrs, &ecs.Attribute{
+			Name:  aws.String(cpuArchAttrName),
+			Value: aws.String(getCPUArch()),
+		})
+	}
+	return attrs
 }
 
 func (client *APIECSClient) getOutpostAttribute(outpostARN string) []*ecs.Attribute {
@@ -394,9 +410,15 @@ func (client *APIECSClient) SubmitTaskStateChange(change api.TaskStateChange) er
 		ExecutionStoppedAt: change.ExecutionStoppedAt,
 	}
 
+	for _, managedAgentEvent := range change.ManagedAgents {
+		if mgspl := client.buildManagedAgentStateChangePayload(managedAgentEvent); mgspl != nil {
+			req.ManagedAgents = append(req.ManagedAgents, mgspl)
+		}
+	}
+
 	containerEvents := make([]*ecs.ContainerStateChange, len(change.Containers))
 	for i, containerEvent := range change.Containers {
-		containerEvents[i] = client.buildContainerStateChangePayload(containerEvent)
+		containerEvents[i] = client.buildContainerStateChangePayload(containerEvent, client.config.ShouldExcludeIPv6PortBinding.Enabled())
 	}
 
 	req.Containers = containerEvents
@@ -419,7 +441,25 @@ func trimString(inputString string, maxLen int) string {
 	}
 }
 
-func (client *APIECSClient) buildContainerStateChangePayload(change api.ContainerStateChange) *ecs.ContainerStateChange {
+func (client *APIECSClient) buildManagedAgentStateChangePayload(change api.ManagedAgentStateChange) *ecs.ManagedAgentStateChange {
+	if !change.Status.ShouldReportToBackend() {
+		seelog.Warnf("Not submitting unsupported managed agent state %s for container %s in task %s",
+			change.Status.String(), change.Container.Name, change.TaskArn)
+		return nil
+	}
+	var trimmedReason *string
+	if change.Reason != "" {
+		trimmedReason = aws.String(trimString(change.Reason, ecsMaxReasonLength))
+	}
+	return &ecs.ManagedAgentStateChange{
+		ManagedAgentName: aws.String(change.Name),
+		ContainerName:    aws.String(change.Container.Name),
+		Status:           aws.String(change.Status.String()),
+		Reason:           trimmedReason,
+	}
+}
+
+func (client *APIECSClient) buildContainerStateChangePayload(change api.ContainerStateChange, shouldExcludeIPv6PortBinding bool) *ecs.ContainerStateChange {
 	statechange := &ecs.ContainerStateChange{
 		ContainerName: aws.String(change.ContainerName),
 	}
@@ -442,26 +482,35 @@ func (client *APIECSClient) buildContainerStateChangePayload(change api.Containe
 			status.String(), change.ContainerName, change.TaskArn)
 		return nil
 	}
-
-	statechange.Status = aws.String(status.String())
+	stat := change.Status.String()
+	if stat == "DEAD" {
+		stat = apicontainerstatus.ContainerStopped.String()
+	}
+	statechange.Status = aws.String(stat)
 
 	if change.ExitCode != nil {
 		exitCode := int64(aws.IntValue(change.ExitCode))
 		statechange.ExitCode = aws.Int64(exitCode)
 	}
-	networkBindings := make([]*ecs.NetworkBinding, len(change.PortBindings))
-	for i, binding := range change.PortBindings {
+
+	networkBindings := []*ecs.NetworkBinding{}
+	for _, binding := range change.PortBindings {
+		if binding.BindIP == "::" && shouldExcludeIPv6PortBinding {
+			seelog.Debugf("Exclude IPv6 port binding %v for container %s in task %s", binding, change.ContainerName, change.TaskArn)
+			continue
+		}
+
 		hostPort := int64(binding.HostPort)
 		containerPort := int64(binding.ContainerPort)
 		bindIP := binding.BindIP
 		protocol := binding.Protocol.String()
 
-		networkBindings[i] = &ecs.NetworkBinding{
+		networkBindings = append(networkBindings, &ecs.NetworkBinding{
 			BindIP:        aws.String(bindIP),
 			ContainerPort: aws.Int64(containerPort),
 			HostPort:      aws.Int64(hostPort),
 			Protocol:      aws.String(protocol),
-		}
+		})
 	}
 	statechange.NetworkBindings = networkBindings
 
@@ -469,48 +518,21 @@ func (client *APIECSClient) buildContainerStateChangePayload(change api.Containe
 }
 
 func (client *APIECSClient) SubmitContainerStateChange(change api.ContainerStateChange) error {
-	req := ecs.SubmitContainerStateChangeInput{
-		Cluster:       &client.config.Cluster,
-		Task:          &change.TaskArn,
-		ContainerName: &change.ContainerName,
-	}
-	if change.RuntimeID != "" {
-		trimmedRuntimeID := trimString(change.RuntimeID, ecsMaxRuntimeIDLength)
-		req.RuntimeId = &trimmedRuntimeID
-	}
-	if change.Reason != "" {
-		trimmedReason := trimString(change.Reason, ecsMaxReasonLength)
-		req.Reason = &trimmedReason
-	}
-	stat := change.Status.String()
-	if stat == "DEAD" {
-		stat = "STOPPED"
-	}
-	if stat != "STOPPED" && stat != "RUNNING" {
-		seelog.Infof("Not submitting unsupported upstream container state: %s", stat)
+	pl := client.buildContainerStateChangePayload(change, client.config.ShouldExcludeIPv6PortBinding.Enabled())
+	if pl == nil {
 		return nil
 	}
-	req.Status = &stat
-	if change.ExitCode != nil {
-		exitCode := int64(*change.ExitCode)
-		req.ExitCode = &exitCode
-	}
-	networkBindings := make([]*ecs.NetworkBinding, len(change.PortBindings))
-	for i, binding := range change.PortBindings {
-		hostPort := int64(binding.HostPort)
-		containerPort := int64(binding.ContainerPort)
-		bindIP := binding.BindIP
-		protocol := binding.Protocol.String()
-		networkBindings[i] = &ecs.NetworkBinding{
-			BindIP:        &bindIP,
-			ContainerPort: &containerPort,
-			HostPort:      &hostPort,
-			Protocol:      &protocol,
-		}
-	}
-	req.NetworkBindings = networkBindings
-
-	_, err := client.submitStateChangeClient.SubmitContainerStateChange(&req)
+	_, err := client.submitStateChangeClient.SubmitContainerStateChange(&ecs.SubmitContainerStateChangeInput{
+		Cluster:         aws.String(client.config.Cluster),
+		ContainerName:   aws.String(change.ContainerName),
+		ExitCode:        pl.ExitCode,
+		ManagedAgents:   pl.ManagedAgents,
+		NetworkBindings: pl.NetworkBindings,
+		Reason:          pl.Reason,
+		RuntimeId:       pl.RuntimeId,
+		Status:          pl.Status,
+		Task:            aws.String(change.TaskArn),
+	})
 	if err != nil {
 		seelog.Warnf("Could not submit container state change: [%s]: %v", change.String(), err)
 		return err

@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/agent/logger"
+	"github.com/aws/amazon-ecs-agent/agent/logger/field"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/arn"
@@ -41,7 +43,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
-	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/asmauth"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/asmsecret"
@@ -54,7 +55,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/aws-sdk-go/private/protocol/json/jsonutil"
 	"github.com/cihub/seelog"
-	"github.com/containernetworking/cni/libcni"
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/pkg/errors"
 )
@@ -117,6 +117,8 @@ const (
 	firelensSocketBindFormat = "%s/data/firelens/%s/socket/:/var/run/"
 	// firelensDriverName is the log driver name for containers that want to use the firelens container to send logs.
 	firelensDriverName = "awsfirelens"
+	// FirelensLogDriverBufferLimitOption is the option for customers who want to specify the buffer limit size in FireLens.
+	FirelensLogDriverBufferLimitOption = "log-driver-buffer-limit"
 
 	// firelensConfigVarFmt specifies the format for firelens config variable name. The first placeholder
 	// is option name. The second placeholder is the index of the container in the task's container list, appended
@@ -140,6 +142,11 @@ const (
 
 	// specifies awsvpc type mode for a task
 	AWSVPCNetworkMode = "awsvpc"
+
+	// disableIPv6SysctlKey specifies the setting that controls whether ipv6 is disabled.
+	disableIPv6SysctlKey = "net.ipv6.conf.all.disable_ipv6"
+	// sysctlValueOff specifies the value to use to turn off a sysctl setting.
+	sysctlValueOff = "0"
 )
 
 // TaskOverrides are the overrides applied to a task
@@ -259,6 +266,9 @@ type Task struct {
 	// have a value for this). This field should be accessed via GetLocalIPAddress and SetLocalIPAddress.
 	LocalIPAddressUnsafe string `json:"LocalIPAddress,omitempty"`
 
+	// LaunchType is the launch type of this task.
+	LaunchType string `json:"LaunchType,omitempty"`
+
 	// lock is for protecting all fields in the task struct
 	lock sync.RWMutex
 }
@@ -314,7 +324,7 @@ func (task *Task) initializeVolumes(cfg *config.Config, dockerClient dockerapi.D
 // able to handle such an occurrence appropriately (e.g. behave idempotently).
 func (task *Task) PostUnmarshalTask(cfg *config.Config,
 	credentialsManager credentials.Manager, resourceFields *taskresource.ResourceFields,
-	dockerClient dockerapi.DockerClient, ctx context.Context) error {
+	dockerClient dockerapi.DockerClient, ctx context.Context, options ...Option) error {
 	// TODO, add rudimentary plugin support and call any plugins that want to
 	// hook into this
 	task.adjustForPlatform(cfg)
@@ -338,6 +348,7 @@ func (task *Task) PostUnmarshalTask(cfg *config.Config,
 	task.initSecretResources(credentialsManager, resourceFields)
 
 	task.initializeCredentialsEndpoint(credentialsManager)
+
 	// NOTE: initializeVolumes needs to be after initializeCredentialsEndpoint, because EFS volume might
 	// need the credentials endpoint constructed by it.
 	if err := task.initializeVolumes(cfg, dockerClient, ctx); err != nil {
@@ -375,6 +386,20 @@ func (task *Task) PostUnmarshalTask(cfg *config.Config,
 	}
 	task.populateTaskARN()
 
+	// fsxWindowsFileserver is the product type -- it is technically "agnostic" ie it should apply to both Windows and Linux tasks
+	if task.requiresFSxWindowsFileServerResource() {
+		if err := task.initializeFSxWindowsFileServerResource(cfg, credentialsManager, resourceFields); err != nil {
+			seelog.Errorf("Task [%s]: could not initialize FSx for Windows File Server resource: %v", task.Arn, err)
+			return apierrors.NewResourceInitError(task.Arn, err)
+		}
+	}
+
+	for _, opt := range options {
+		if err := opt(task); err != nil {
+			seelog.Errorf("Task [%s]: could not apply task option: %v", task.Arn, err)
+			return err
+		}
+	}
 	return nil
 }
 
@@ -433,8 +458,12 @@ func (task *Task) addGPUResource(cfg *config.Config) error {
 				container.GPUIDs = append(container.GPUIDs, association.Name)
 			}
 		}
-		task.populateGPUEnvironmentVariables()
-		task.NvidiaRuntime = cfg.NvidiaRuntime
+		// For external instances, GPU IDs are handled by resources struct
+		// For internal instances, GPU IDs are handled by env var
+		if !cfg.External.Enabled() {
+			task.populateGPUEnvironmentVariables()
+			task.NvidiaRuntime = cfg.NvidiaRuntime
+		}
 	}
 	return nil
 }
@@ -478,7 +507,6 @@ func (task *Task) initializeDockerLocalVolumes(dockerClient dockerapi.DockerClie
 					resourcestatus.ResourceStatus(taskresourcevolume.VolumeCreated),
 					apicontainerstatus.ContainerPulled)
 				requiredLocalVolumes = append(requiredLocalVolumes, mountPoint.SourceVolume)
-
 			}
 		}
 	}
@@ -1047,6 +1075,9 @@ func (task *Task) collectFirelensLogOptions(containerToLogOptions map[string]map
 				containerToLogOptions[container.Name] = make(map[string]string)
 			}
 			for k, v := range hostConfig.LogConfig.Config {
+				if k == FirelensLogDriverBufferLimitOption {
+					continue
+				}
 				containerToLogOptions[container.Name][k] = v
 			}
 		}
@@ -1120,70 +1151,6 @@ func (task *Task) AddFirelensContainerBindMounts(firelensConfig *apicontainer.Fi
 		hostConfig.Binds = append(hostConfig.Binds, s3ConfigBind)
 	}
 	return nil
-}
-
-// BuildCNIConfig builds a list of CNI network configurations for the task.
-// If includeIPAMConfig is set to true, the list also includes the bridge IPAM configuration.
-func (task *Task) BuildCNIConfig(includeIPAMConfig bool, cniConfig *ecscni.Config) (*ecscni.Config, error) {
-	if !task.IsNetworkModeAWSVPC() {
-		return nil, errors.New("task config: task network mode is not AWSVPC")
-	}
-
-	var netconf *libcni.NetworkConfig
-	var ifName string
-	var err error
-
-	// Build a CNI network configuration for each ENI.
-	for _, eni := range task.ENIs {
-		switch eni.InterfaceAssociationProtocol {
-		// If the association protocol is set to "default" or unset (to preserve backwards
-		// compatibility), consider it a "standard" ENI attachment.
-		case "", apieni.DefaultInterfaceAssociationProtocol:
-			cniConfig.ID = eni.MacAddress
-			ifName, netconf, err = ecscni.NewENINetworkConfig(eni, cniConfig)
-		case apieni.VLANInterfaceAssociationProtocol:
-			cniConfig.ID = eni.MacAddress
-			ifName, netconf, err = ecscni.NewBranchENINetworkConfig(eni, cniConfig)
-		default:
-			err = errors.Errorf("task config: unknown interface association type: %s",
-				eni.InterfaceAssociationProtocol)
-		}
-
-		if err != nil {
-			return nil, err
-		}
-
-		cniConfig.NetworkConfigs = append(cniConfig.NetworkConfigs, &ecscni.NetworkConfig{
-			IfName:           ifName,
-			CNINetworkConfig: netconf,
-		})
-	}
-
-	// Build the bridge CNI network configuration.
-	// All AWSVPC tasks have a bridge network.
-	ifName, netconf, err = ecscni.NewBridgeNetworkConfig(cniConfig, includeIPAMConfig)
-	if err != nil {
-		return nil, err
-	}
-	cniConfig.NetworkConfigs = append(cniConfig.NetworkConfigs, &ecscni.NetworkConfig{
-		IfName:           ifName,
-		CNINetworkConfig: netconf,
-	})
-
-	// Build a CNI network configuration for AppMesh if enabled.
-	appMeshConfig := task.GetAppMesh()
-	if appMeshConfig != nil {
-		ifName, netconf, err = ecscni.NewAppMeshConfig(appMeshConfig, cniConfig)
-		if err != nil {
-			return nil, err
-		}
-		cniConfig.NetworkConfigs = append(cniConfig.NetworkConfigs, &ecscni.NetworkConfig{
-			IfName:           ifName,
-			CNINetworkConfig: netconf,
-		})
-	}
-
-	return cniConfig, nil
 }
 
 // IsNetworkModeAWSVPC checks if the task is configured to use the AWSVPC task networking feature.
@@ -1308,7 +1275,7 @@ func (task *Task) HostVolumeByName(name string) (taskresourcevolume.Volume, bool
 // volume feature.
 func (task *Task) UpdateMountPoints(cont *apicontainer.Container, vols []types.MountPoint) {
 	for _, mountPoint := range cont.MountPoints {
-		containerPath := getCanonicalPath(mountPoint.ContainerPath)
+		containerPath := utils.GetCanonicalPath(mountPoint.ContainerPath)
 		for _, vol := range vols {
 			if strings.Compare(vol.Destination, containerPath) == 0 ||
 				// /path/ -> /path or \path\ -> \path
@@ -1366,10 +1333,15 @@ func (task *Task) updateTaskKnownStatus() (newStatus apitaskstatus.TaskStatus) {
 	// statuses and compute the min of this
 	earliestKnownTaskStatus := task.getEarliestKnownTaskStatusForContainers()
 	if task.GetKnownStatus() < earliestKnownTaskStatus {
-		seelog.Infof("api/task: Updating task's known status to: %s, task: %s",
-			earliestKnownTaskStatus.String(), task.String())
 		task.SetKnownStatus(earliestKnownTaskStatus)
-		return task.GetKnownStatus()
+		logger.Info("Container change also resulted in task change", logger.Fields{
+			field.TaskARN:       task.Arn,
+			field.Container:     earliestKnownStatusContainer.Name,
+			field.RuntimeID:     earliestKnownStatusContainer.RuntimeID,
+			field.DesiredStatus: task.GetDesiredStatus().String(),
+			field.KnownStatus:   earliestKnownTaskStatus.String(),
+		})
+		return earliestKnownTaskStatus
 	}
 	return apitaskstatus.TaskStatusNone
 }
@@ -1498,7 +1470,7 @@ func (task *Task) dockerHostConfig(container *apicontainer.Container, dockerCont
 		return nil, &apierrors.HostConfigError{Msg: err.Error()}
 	}
 
-	resources := task.getDockerResources(container)
+	resources := task.getDockerResources(container, cfg)
 
 	// Populate hostConfig
 	hostConfig := &dockercontainer.HostConfig{
@@ -1540,6 +1512,11 @@ func (task *Task) dockerHostConfig(container *apicontainer.Container, dockerCont
 				hostConfig.ExtraHosts = append(hostConfig.ExtraHosts, hosts...)
 			}
 
+			if task.shouldEnableIPv6() {
+				// By default, the disable ipv6 setting is turned on, so need to turn it off to enable it.
+				enableIPv6SysctlSetting(hostConfig)
+			}
+
 			// Override the DNS settings for the pause container if ENI has custom
 			// DNS settings
 			return task.overrideDNS(hostConfig), nil
@@ -1563,11 +1540,13 @@ func (task *Task) dockerHostConfig(container *apicontainer.Container, dockerCont
 func (task *Task) overrideContainerRuntime(container *apicontainer.Container, hostCfg *dockercontainer.HostConfig,
 	cfg *config.Config) *apierrors.HostConfigError {
 	if task.isGPUEnabled() && task.shouldRequireNvidiaRuntime(container) {
-		if task.NvidiaRuntime == "" {
-			return &apierrors.HostConfigError{Msg: "Runtime is not set for GPU containers"}
+		if !cfg.External.Enabled() {
+			if task.NvidiaRuntime == "" {
+				return &apierrors.HostConfigError{Msg: "Runtime is not set for GPU containers"}
+			}
+			seelog.Debugf("Setting runtime as %s for container %s", task.NvidiaRuntime, container.Name)
+			hostCfg.Runtime = task.NvidiaRuntime
 		}
-		seelog.Debugf("Setting runtime as %s for container %s", task.NvidiaRuntime, container.Name)
-		hostCfg.Runtime = task.NvidiaRuntime
 	}
 
 	if cfg.InferentiaSupportEnabled && container.RequireNeuronRuntime() {
@@ -1578,29 +1557,30 @@ func (task *Task) overrideContainerRuntime(container *apicontainer.Container, ho
 }
 
 // Requires an *apicontainer.Container and returns the Resources for the HostConfig struct
-func (task *Task) getDockerResources(container *apicontainer.Container) dockercontainer.Resources {
+func (task *Task) getDockerResources(container *apicontainer.Container, cfg *config.Config) dockercontainer.Resources {
 	// Allow treating Memory as a MemoryReservation if a DOCKER_MEMORY_LIMIT
 	// environment variable is set.
-	memory_mb     := container.Memory
-	memory_res_mb := memory_mb
+	memoryMB := container.Memory
+	memoryReservationMB := memoryMB
 	if container.Environment != nil {
-		memory_limit_mb_str, prs := container.Environment["DOCKER_MEMORY_LIMIT"]
+		memoryLimitMBStr, prs := container.Environment["DOCKER_MEMORY_LIMIT"]
 		if prs {
-			memory_limit_mb, err := strconv.Atoi(memory_limit_mb_str)
+			memoryLimitMB, err := strconv.Atoi(memoryLimitMBStr)
 			if err == nil {
-				memory_mb = uint(memory_limit_mb)
+				memoryMB = uint(memoryLimitMB)
 			}
 		}
 	}
 
 	// Convert MB to B and set Memory
-	dockerMem := int64(memory_mb * 1024 * 1024)
-	dockerMemReservation := int64(memory_res_mb * 1024 * 1024)
+	dockerMem := int64(memoryMB * 1024 * 1024)
+	dockerMemReservation := int64(memoryReservationMB * 1024 * 1024)
 	if dockerMem != 0 && dockerMem < apicontainer.DockerContainerMinimumMemoryInBytes {
 		seelog.Warnf("Task %s container %s memory setting is too low, increasing to %d bytes",
 			task.Arn, container.Name, apicontainer.DockerContainerMinimumMemoryInBytes)
 		dockerMem = apicontainer.DockerContainerMinimumMemoryInBytes
 	}
+
 	// Set CPUShares
 	cpuShare := task.dockerCPUShares(container.CPU)
 	resources := dockercontainer.Resources{
@@ -1612,6 +1592,13 @@ func (task *Task) getDockerResources(container *apicontainer.Container) dockerco
 		resources.MemoryReservation = dockerMemReservation
 	}
 
+	if cfg.External.Enabled() && cfg.GPUSupportEnabled {
+		deviceRequest := dockercontainer.DeviceRequest{
+			Capabilities: [][]string{[]string{"gpu"}},
+			DeviceIDs:    container.GPUIDs,
+		}
+		resources.DeviceRequests = []dockercontainer.DeviceRequest{deviceRequest}
+	}
 	return resources
 }
 
@@ -1715,6 +1702,14 @@ func (task *Task) generateENIExtraHosts() []string {
 		extraHosts = append(extraHosts, host)
 	}
 	return extraHosts
+}
+
+func (task *Task) shouldEnableIPv6() bool {
+	eni := task.GetPrimaryENI()
+	if eni == nil {
+		return false
+	}
+	return len(eni.GetIPV6Addresses()) > 0
 }
 
 // shouldOverridePIDMode returns true if the PIDMode of the container needs
@@ -1958,6 +1953,9 @@ func (task *Task) updateTaskDesiredStatusUnsafe() {
 	// A task's desired status is stopped if any essential container is stopped
 	// Otherwise, the task's desired status is unchanged (typically running, but no need to change)
 	for _, cont := range task.Containers {
+		if task.DesiredStatusUnsafe == apitaskstatus.TaskStopped {
+			break
+		}
 		if cont.Essential && (cont.KnownTerminal() || cont.DesiredTerminal()) {
 			seelog.Infof("api/task: Updating task desired status to stopped because of container: [%s]; task: [%s]",
 				cont.Name, task.stringUnsafe())
@@ -2237,35 +2235,15 @@ func (task *Task) GetExecutionStoppedAt() time.Time {
 
 // String returns a human readable string representation of this object
 func (task *Task) String() string {
-	task.lock.Lock()
-	defer task.lock.Unlock()
 	return task.stringUnsafe()
 }
 
 // stringUnsafe returns a human readable string representation of this object
 func (task *Task) stringUnsafe() string {
-	res := fmt.Sprintf("%s:%s %s, TaskStatus: (%s->%s)",
+	return fmt.Sprintf("%s:%s %s, TaskStatus: (%s->%s) N Containers: %d, N ENIs %d",
 		task.Family, task.Version, task.Arn,
-		task.KnownStatusUnsafe.String(), task.DesiredStatusUnsafe.String())
-
-	res += " Containers: ["
-	for _, container := range task.Containers {
-		res += fmt.Sprintf("%s (%s->%s),",
-			container.Name,
-			container.GetKnownStatus().String(),
-			container.GetDesiredStatus().String())
-	}
-	res += "]"
-
-	if len(task.ENIs) > 0 {
-		res += " ENIs: ["
-		for _, eni := range task.ENIs {
-			res += fmt.Sprintf("%s,", eni.String())
-		}
-		res += "]"
-	}
-
-	return res
+		task.KnownStatusUnsafe.String(), task.DesiredStatusUnsafe.String(),
+		len(task.Containers), len(task.ENIs))
 }
 
 // GetID is used to retrieve the taskID from taskARN
@@ -2716,4 +2694,15 @@ func (task *Task) SetLocalIPAddress(addr string) {
 	defer task.lock.Unlock()
 
 	task.LocalIPAddressUnsafe = addr
+}
+
+// UpdateTaskENIsLinkName updates the link name of all the enis associated with the task.
+func (task *Task) UpdateTaskENIsLinkName() {
+	task.lock.Lock()
+	defer task.lock.Unlock()
+
+	// Update the link name of the task eni.
+	for _, eni := range task.ENIs {
+		eni.GetLinkName()
+	}
 }

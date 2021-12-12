@@ -1,4 +1,4 @@
-// +build unit
+//go:build unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -38,6 +38,7 @@ import (
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
+	mock_credentials "github.com/aws/amazon-ecs-agent/agent/credentials/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/data"
 	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dependencygraph"
@@ -73,8 +74,8 @@ func TestHandleEventError(t *testing.T) {
 			CurrentContainerKnownStatus:     apicontainerstatus.ContainerRunning,
 			Error:                           &dockerapi.DockerTimeoutError{},
 			ExpectedContainerKnownStatusSet: true,
-			ExpectedContainerKnownStatus:    apicontainerstatus.ContainerRunning,
-			ExpectedOK:                      false,
+			ExpectedContainerKnownStatus:    apicontainerstatus.ContainerStopped,
+			ExpectedOK:                      true,
 		},
 		{
 			Name:                        "Retriable error with stop",
@@ -84,8 +85,8 @@ func TestHandleEventError(t *testing.T) {
 				FromError: errors.New(""),
 			},
 			ExpectedContainerKnownStatusSet: true,
-			ExpectedContainerKnownStatus:    apicontainerstatus.ContainerRunning,
-			ExpectedOK:                      false,
+			ExpectedContainerKnownStatus:    apicontainerstatus.ContainerStopped,
+			ExpectedOK:                      true,
 		},
 		{
 			Name:                        "Unretriable error with Stop",
@@ -187,6 +188,15 @@ func TestHandleEventError(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.Name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			client := mock_dockerapi.NewMockDockerClient(ctrl)
+
+			if tc.EventStatus == apicontainerstatus.ContainerStopped {
+				client.EXPECT().SystemPing(gomock.Any(), gomock.Any()).Return(dockerapi.PingResponse{}).
+					Times(1)
+			}
+
 			container := &apicontainer.Container{
 				KnownStatusUnsafe: tc.CurrentContainerKnownStatus,
 			}
@@ -203,8 +213,9 @@ func TestHandleEventError(t *testing.T) {
 				Task: &apitask.Task{
 					Arn: "task1",
 				},
-				engine: &DockerTaskEngine{},
-				cfg:    &config.Config{ImagePullBehavior: tc.ImagePullBehavior},
+				engine:       &DockerTaskEngine{},
+				cfg:          &config.Config{ImagePullBehavior: tc.ImagePullBehavior},
+				dockerClient: client,
 			}
 			ok := mtask.handleEventError(containerChange, tc.CurrentContainerKnownStatus)
 			assert.Equal(t, tc.ExpectedOK, ok, "to proceed")
@@ -1323,6 +1334,75 @@ func TestTaskWaitForExecutionCredentials(t *testing.T) {
 			assert.Equal(t, tc.result, task.isWaitingForACSExecutionCredentials(tc.errs), tc.msg)
 		})
 	}
+}
+
+func TestCleanupTaskWithExecutionCredentials(t *testing.T) {
+	cfg := getTestConfig()
+	ctrl := gomock.NewController(t)
+	mockTime := mock_ttime.NewMockTime(ctrl)
+	mockState := mock_dockerstate.NewMockTaskEngineState(ctrl)
+	mockClient := mock_dockerapi.NewMockDockerClient(ctrl)
+	mockImageManager := mock_engine.NewMockImageManager(ctrl)
+	mockCredentialsManager := mock_credentials.NewMockManager(ctrl)
+	mockResource := mock_taskresource.NewMockTaskResource(ctrl)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+
+	taskEngine := &DockerTaskEngine{
+		ctx:                ctx,
+		cfg:                &cfg,
+		dataClient:         data.NewNoopClient(),
+		state:              mockState,
+		client:             mockClient,
+		imageManager:       mockImageManager,
+		credentialsManager: mockCredentialsManager,
+	}
+	mTask := &managedTask{
+		ctx:                      ctx,
+		cancel:                   cancel,
+		Task:                     testdata.LoadTask("sleep5"),
+		credentialsManager:       mockCredentialsManager,
+		_time:                    mockTime,
+		engine:                   taskEngine,
+		acsMessages:              make(chan acsTransition),
+		dockerMessages:           make(chan dockerContainerChange),
+		resourceStateChangeEvent: make(chan resourceStateChange),
+		cfg:                      taskEngine.cfg,
+	}
+
+	mTask.Task.ResourcesMapUnsafe = make(map[string][]taskresource.TaskResource)
+	mTask.Task.SetExecutionRoleCredentialsID("executionRoleCredentialsId")
+	mTask.AddResource("mockResource", mockResource)
+	mTask.SetKnownStatus(apitaskstatus.TaskStopped)
+	mTask.SetSentStatus(apitaskstatus.TaskStopped)
+	container := mTask.Containers[0]
+	dockerContainer := &apicontainer.DockerContainer{
+		DockerName: "dockerContainer",
+	}
+
+	// Expectations for triggering cleanup
+	now := mTask.GetKnownStatusTime()
+	taskStoppedDuration := 1 * time.Minute
+	mockTime.EXPECT().Now().Return(now).AnyTimes()
+	cleanupTimeTrigger := make(chan time.Time)
+	mockTime.EXPECT().After(gomock.Any()).Return(cleanupTimeTrigger)
+	go func() {
+		cleanupTimeTrigger <- now
+	}()
+
+	// Expectations to verify the execution credentials get removed
+	mockCredentialsManager.EXPECT().RemoveCredentials("executionRoleCredentialsId")
+
+	// Expectations to verify that the task gets removed
+	mockState.EXPECT().ContainerMapByArn(mTask.Arn).Return(map[string]*apicontainer.DockerContainer{container.Name: dockerContainer}, true)
+	mockClient.EXPECT().RemoveContainer(gomock.Any(), dockerContainer.DockerName, gomock.Any()).Return(nil)
+	mockImageManager.EXPECT().RemoveContainerReferenceFromImageState(container).Return(nil)
+	mockState.EXPECT().RemoveTask(mTask.Task)
+	mockResource.EXPECT().Cleanup()
+	mockResource.EXPECT().GetName()
+	mTask.cleanupTask(taskStoppedDuration)
 }
 
 func TestCleanupTaskWithInvalidInterval(t *testing.T) {

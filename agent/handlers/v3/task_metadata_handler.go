@@ -45,19 +45,19 @@ func TaskMetadataHandler(state dockerstate.TaskEngineState, ecsClient api.ECSCli
 			if e := utils.WriteResponseIfMarshalError(w, err); e != nil {
 				return
 			}
-			utils.WriteJSONToResponse(w, http.StatusBadRequest, responseJSON, utils.RequestTypeTaskMetadata)
+			utils.WriteJSONToResponse(w, http.StatusInternalServerError, responseJSON, utils.RequestTypeTaskMetadata)
 			return
 		}
 
 		seelog.Infof("V3 task metadata handler: writing response for task '%s'", taskARN)
 
-		taskResponse, err := v2.NewTaskResponse(taskARN, state, ecsClient, cluster, az, containerInstanceArn, propagateTags)
+		taskResponse, err := v2.NewTaskResponse(taskARN, state, ecsClient, cluster, az, containerInstanceArn, propagateTags, false)
 		if err != nil {
 			errResponseJSON, err := json.Marshal("Unable to generate metadata for task: '" + taskARN + "'")
 			if e := utils.WriteResponseIfMarshalError(w, err); e != nil {
 				return
 			}
-			utils.WriteJSONToResponse(w, http.StatusBadRequest, errResponseJSON, utils.RequestTypeTaskMetadata)
+			utils.WriteJSONToResponse(w, http.StatusInternalServerError, errResponseJSON, utils.RequestTypeTaskMetadata)
 			return
 		}
 
@@ -72,7 +72,7 @@ func TaskMetadataHandler(state dockerstate.TaskEngineState, ecsClient api.ECSCli
 					if e := utils.WriteResponseIfMarshalError(w, err); e != nil {
 						return
 					}
-					utils.WriteJSONToResponse(w, http.StatusBadRequest, errResponseJSON, utils.RequestTypeContainerMetadata)
+					utils.WriteJSONToResponse(w, http.StatusInternalServerError, errResponseJSON, utils.RequestTypeContainerMetadata)
 					return
 				}
 				containerResponse.Networks = networks

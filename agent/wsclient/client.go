@@ -188,7 +188,7 @@ func (cs *ClientServerImpl) Connect() error {
 		ReadBufferSize:   readBufSize,
 		WriteBufferSize:  writeBufSize,
 		TLSClientConfig:  tlsConfig,
-		Proxy:            http.ProxyFromEnvironment,
+		Proxy:            utils.Proxy,
 		NetDial:          timeoutDialer.Dial,
 		HandshakeTimeout: wsHandshakeTimeout,
 	}
@@ -265,7 +265,7 @@ func (cs *ClientServerImpl) SetReadDeadline(t time.Time) error {
 }
 
 func (cs *ClientServerImpl) forceCloseConnection() {
-	closeChan := make(chan error)
+	closeChan := make(chan error, 1)
 	go func() {
 		closeChan <- cs.Close()
 	}()

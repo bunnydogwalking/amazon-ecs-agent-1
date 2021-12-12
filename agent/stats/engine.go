@@ -281,7 +281,7 @@ func (engine *DockerStatsEngine) addToStatsTaskMapUnsafe(task *apitask.Task, doc
 			}
 			containerpid := strconv.Itoa(containerInspect.State.Pid)
 			statsTaskContainer, err = newStatsTaskContainer(task.Arn, containerpid, numberOfContainers,
-				engine.resolver, engine.config.PollingMetricsWaitDuration)
+				engine.resolver, engine.config.PollingMetricsWaitDuration, task.ENIs)
 			if err != nil {
 				return
 			}
@@ -583,7 +583,8 @@ func (engine *DockerStatsEngine) handleDockerEvents(events ...interface{}) error
 		case apicontainerstatus.ContainerStopped:
 			engine.removeContainer(dockerContainerChangeEvent.DockerID)
 		default:
-			seelog.Debugf("Ignoring event for container, id: %s, status: %d", dockerContainerChangeEvent.DockerID, dockerContainerChangeEvent.Status)
+			seelog.Debugf("Ignoring event for container, id: %s, status: %d",
+				dockerContainerChangeEvent.DockerID, dockerContainerChangeEvent.Status)
 		}
 	}
 
@@ -697,17 +698,23 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 				if !taskExistsInTaskStats {
 					return nil, fmt.Errorf("task not found")
 				}
-				networkStats, err := taskStatsMap.StatsQueue.GetNetworkStatsSet()
-				if err != nil {
-					seelog.Warnf("error getting network stats: %v, task: %v", err, taskArn)
+				if dockerContainer, err := engine.resolver.ResolveContainer(dockerID); err != nil {
+					seelog.Debugf("Could not map container ID to container, container: %s, err: %s", dockerID, err)
 				} else {
-					containerMetric.NetworkStatsSet = networkStats
+					// do not add network stats for pause container
+					if dockerContainer.Container.Type != apicontainer.ContainerCNIPause {
+						networkStats, err := taskStatsMap.StatsQueue.GetNetworkStatsSet()
+						if err != nil {
+							seelog.Warnf("error getting network stats: %v, task: %v", err, taskArn)
+						} else {
+							containerMetric.NetworkStatsSet = networkStats
+						}
+					}
 				}
 			}
 		}
 		containerMetrics = append(containerMetrics, containerMetric)
 	}
-
 	return containerMetrics, nil
 }
 

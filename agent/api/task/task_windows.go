@@ -1,4 +1,4 @@
-// +build windows
+//go:build windows
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -16,24 +16,26 @@
 package task
 
 import (
-	"errors"
-	"path/filepath"
-	"regexp"
 	"runtime"
-	"strings"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
+	"github.com/containernetworking/cni/libcni"
 
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
+	apieni "github.com/aws/amazon-ecs-agent/agent/api/eni"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/credentialspec"
+	"github.com/aws/amazon-ecs-agent/agent/taskresource/fsxwindowsfileserver"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
+	resourcetype "github.com/aws/amazon-ecs-agent/agent/taskresource/types"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
 	"github.com/cihub/seelog"
 	dockercontainer "github.com/docker/docker/api/types/container"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -71,49 +73,16 @@ func (task *Task) adjustForPlatform(cfg *config.Config) {
 func (task *Task) downcaseAllVolumePaths() {
 	for _, volume := range task.Volumes {
 		if hostVol, ok := volume.Volume.(*taskresourcevolume.FSHostVolume); ok {
-			hostVol.FSSourcePath = getCanonicalPath(hostVol.FSSourcePath)
+			hostVol.FSSourcePath = utils.GetCanonicalPath(hostVol.FSSourcePath)
 		}
 	}
 	for _, container := range task.Containers {
 		for i, mountPoint := range container.MountPoints {
 			// container.MountPoints is a slice of values, not a slice of pointers so
 			// we need to mutate the actual value instead of the copied value
-			container.MountPoints[i].ContainerPath = getCanonicalPath(mountPoint.ContainerPath)
+			container.MountPoints[i].ContainerPath = utils.GetCanonicalPath(mountPoint.ContainerPath)
 		}
 	}
-}
-
-func getCanonicalPath(path string) string {
-	lowercasedPath := strings.ToLower(path)
-	// if the path is a bare drive like "d:", don't filepath.Clean it because it will add a '.'.
-	// this is to fix the case where mounting from D:\ to D: is supported by docker but not ecs
-	if isBareDrive(lowercasedPath) {
-		return lowercasedPath
-	}
-
-	if isNamedPipesPath(lowercasedPath) {
-		return lowercasedPath
-	}
-
-	return filepath.Clean(lowercasedPath)
-}
-
-func isBareDrive(path string) bool {
-	if filepath.VolumeName(path) == path {
-		return true
-	}
-
-	return false
-}
-
-func isNamedPipesPath(path string) bool {
-	matched, err := regexp.MatchString(`\\{2}\.[\\]pipe[\\].+`, path)
-
-	if err != nil {
-		return false
-	}
-
-	return matched
 }
 
 // platformHostConfigOverride provides an entry point to set up default HostConfig options to be
@@ -212,4 +181,117 @@ func (task *Task) GetCredentialSpecResource() ([]taskresource.TaskResource, bool
 
 	res, ok := task.ResourcesMapUnsafe[credentialspec.ResourceName]
 	return res, ok
+}
+
+func enableIPv6SysctlSetting(hostConfig *dockercontainer.HostConfig) {
+	return
+}
+
+// requiresFSxWindowsFileServerResource returns true if at least one volume in the task
+// is of type 'fsxWindowsFileServer'
+func (task *Task) requiresFSxWindowsFileServerResource() bool {
+	for _, volume := range task.Volumes {
+		if volume.Type == FSxWindowsFileServerVolumeType {
+			return true
+		}
+	}
+	return false
+}
+
+// initializeFSxWindowsFileServerResource builds the resource dependency map for the fsxwindowsfileserver resource
+func (task *Task) initializeFSxWindowsFileServerResource(cfg *config.Config, credentialsManager credentials.Manager,
+	resourceFields *taskresource.ResourceFields) error {
+	for i, vol := range task.Volumes {
+		if vol.Type != FSxWindowsFileServerVolumeType {
+			continue
+		}
+
+		fsxWindowsFileServerVol, ok := vol.Volume.(*fsxwindowsfileserver.FSxWindowsFileServerVolumeConfig)
+		if !ok {
+			return errors.New("task volume: volume configuration does not match the type 'fsxWindowsFileServer'")
+		}
+
+		err := task.addFSxWindowsFileServerResource(cfg, credentialsManager, resourceFields, &task.Volumes[i], fsxWindowsFileServerVol)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addFSxWindowsFileServerResource creates a fsxwindowsfileserver resource for every fsxwindowsfileserver task volume
+// and updates container dependency
+func (task *Task) addFSxWindowsFileServerResource(
+	cfg *config.Config,
+	credentialsManager credentials.Manager,
+	resourceFields *taskresource.ResourceFields,
+	vol *TaskVolume,
+	fsxWindowsFileServerVol *fsxwindowsfileserver.FSxWindowsFileServerVolumeConfig,
+) error {
+	fsxwindowsfileserverResource, err := fsxwindowsfileserver.NewFSxWindowsFileServerResource(
+		task.Arn,
+		cfg.AWSRegion,
+		vol.Name,
+		FSxWindowsFileServerVolumeType,
+		fsxWindowsFileServerVol,
+		task.ExecutionCredentialsID,
+		credentialsManager,
+		resourceFields.SSMClientCreator,
+		resourceFields.ASMClientCreator,
+		resourceFields.FSxClientCreator)
+	if err != nil {
+		return err
+	}
+
+	vol.Volume = &fsxwindowsfileserverResource.VolumeConfig
+	task.AddResource(resourcetype.FSxWindowsFileServerKey, fsxwindowsfileserverResource)
+	task.updateContainerVolumeDependency(vol.Name)
+
+	return nil
+}
+
+// BuildCNIConfig builds a list of CNI network configurations for the task.
+func (task *Task) BuildCNIConfig(includeIPAMConfig bool, cniConfig *ecscni.Config) (*ecscni.Config, error) {
+	if !task.IsNetworkModeAWSVPC() {
+		return nil, errors.New("task config: task network mode is not awsvpc")
+	}
+
+	var netconf *libcni.NetworkConfig
+	var err error
+
+	// Build a CNI network configuration for each ENI.
+	for _, eni := range task.ENIs {
+		switch eni.InterfaceAssociationProtocol {
+		// If the association protocol is set to "default" or unset (to preserve backwards
+		// compatibility), consider it a "standard" ENI attachment.
+		case "", apieni.DefaultInterfaceAssociationProtocol:
+			cniConfig.ID = eni.MacAddress
+			netconf, err = ecscni.NewVPCENIPluginConfigForTaskNSSetup(eni, cniConfig)
+		default:
+			err = errors.Errorf("task config: unknown interface association type: %s",
+				eni.InterfaceAssociationProtocol)
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		// IfName is expected by the plugin but is not used.
+		cniConfig.NetworkConfigs = append(cniConfig.NetworkConfigs, &ecscni.NetworkConfig{
+			IfName:           eni.ID,
+			CNINetworkConfig: netconf,
+		})
+	}
+
+	// Create the vpc-eni plugin configuration to setup ecs-bridge endpoint in the task namespace.
+	netconf, err = ecscni.NewVPCENIPluginConfigForECSBridgeSetup(cniConfig)
+	if err != nil {
+		return nil, err
+	}
+	cniConfig.NetworkConfigs = append(cniConfig.NetworkConfigs, &ecscni.NetworkConfig{
+		IfName:           ecscni.ECSBridgeNetworkName,
+		CNINetworkConfig: netconf,
+	})
+
+	return cniConfig, nil
 }

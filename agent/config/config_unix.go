@@ -1,4 +1,5 @@
-// +build !windows
+//go:build !windows
+
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
@@ -28,6 +29,10 @@ const (
 	AgentCredentialsAddress = "" // this is left blank right now for net=bridge
 	// defaultAuditLogFile specifies the default audit log filename
 	defaultCredentialsAuditLogFile = "/log/audit.log"
+
+	// defaultRuntimeStatsLogFile stores the path where the golang runtime stats are periodically logged
+	defaultRuntimeStatsLogFile = `/log/agent-runtime-stats.log`
+
 	// DefaultTaskCgroupPrefix is default cgroup prefix for ECS tasks
 	DefaultTaskCgroupPrefix = "/ecs"
 
@@ -38,6 +43,10 @@ const (
 	defaultContainerStartTimeout = 3 * time.Minute
 	// minimumContainerStartTimeout specifies the minimum value for starting a container
 	minimumContainerStartTimeout = 45 * time.Second
+	// defaultContainerCreateTimeout specifies the value for container create timeout duration
+	defaultContainerCreateTimeout = 4 * time.Minute
+	// minimumContainerCreateTimeout specifies the minimum value for creating a container
+	minimumContainerCreateTimeout = 1 * time.Minute
 	// default docker inactivity time is extra time needed on container extraction
 	defaultImagePullInactivityTimeout = 1 * time.Minute
 )
@@ -56,6 +65,8 @@ func DefaultConfig() Config {
 		TaskCleanupWaitDuration:             DefaultTaskCleanupWaitDuration,
 		DockerStopTimeout:                   defaultDockerStopTimeout,
 		ContainerStartTimeout:               defaultContainerStartTimeout,
+		ContainerCreateTimeout:              defaultContainerCreateTimeout,
+		DependentContainersPullUpfront:      BooleanDefaultFalse{Value: ExplicitlyDisabled},
 		CredentialsAuditLogFile:             defaultCredentialsAuditLogFile,
 		CredentialsAuditLogDisabled:         false,
 		ImageCleanupDisabled:                BooleanDefaultFalse{Value: ExplicitlyDisabled},
@@ -63,6 +74,7 @@ func DefaultConfig() Config {
 		NonECSMinimumImageDeletionAge:       DefaultNonECSImageDeletionAge,
 		ImageCleanupInterval:                DefaultImageCleanupTimeInterval,
 		ImagePullInactivityTimeout:          defaultImagePullInactivityTimeout,
+		ImagePullTimeout:                    DefaultImagePullTimeout,
 		NumImagesToDeletePerCycle:           DefaultNumImagesToDeletePerCycle,
 		NumNonECSContainersToDeletePerCycle: DefaultNumNonECSContainersToDeletePerCycle,
 		CNIPluginsPath:                      defaultCNIPluginsPath,
@@ -78,11 +90,15 @@ func DefaultConfig() Config {
 		SharedVolumeMatchFullConfig:         BooleanDefaultFalse{Value: ExplicitlyDisabled}, // only requiring shared volumes to match on name, which is default docker behavior
 		ContainerInstancePropagateTagsFrom:  ContainerInstancePropagateTagsFromNoneType,
 		PrometheusMetricsEnabled:            false,
-		PollMetrics:                         BooleanDefaultTrue{Value: ExplicitlyDisabled},
+		PollMetrics:                         BooleanDefaultFalse{Value: NotSet},
 		PollingMetricsWaitDuration:          DefaultPollingMetricsWaitDuration,
 		NvidiaRuntime:                       DefaultNvidiaRuntime,
 		CgroupCPUPeriod:                     defaultCgroupCPUPeriod,
 		GMSACapable:                         false,
+		FSxWindowsFileServerCapable:         false,
+		RuntimeStatsLogFile:                 defaultRuntimeStatsLogFile,
+		EnableRuntimeStats:                  BooleanDefaultFalse{Value: NotSet},
+		ShouldExcludeIPv6PortBinding:        BooleanDefaultTrue{Value: ExplicitlyEnabled},
 	}
 }
 
@@ -108,4 +124,8 @@ func (cfg *Config) platformString() string {
 			cfg.PauseContainerImageName, cfg.PauseContainerTag)
 	}
 	return ""
+}
+
+func getConfigFileName() (string, error) {
+	return utils.DefaultIfBlank(os.Getenv("ECS_AGENT_CONFIG_FILE_PATH"), defaultConfigFileName), nil
 }

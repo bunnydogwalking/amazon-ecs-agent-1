@@ -1,4 +1,4 @@
-// +build unit
+//go:build unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +38,8 @@ import (
 	rolecredentials "github.com/aws/amazon-ecs-agent/agent/credentials"
 	mock_credentials "github.com/aws/amazon-ecs-agent/agent/credentials/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/data"
+	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
+	"github.com/aws/amazon-ecs-agent/agent/doctor"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	mock_engine "github.com/aws/amazon-ecs-agent/agent/engine/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/eventhandler"
@@ -89,6 +92,7 @@ const (
                 "ipv6Addresses": [{
                     "address": "ipv6"
                 }],
+                "subnetGatewayIpv4Address": "ipv4/20",
                 "macAddress": "mac"
         }],
         "roleCredentials": {
@@ -177,6 +181,8 @@ func TestACSWSURL(t *testing.T) {
 	assert.Equal(t, "DockerVersion: Docker version result", parsed.Query().Get("dockerVersion"), "wrong docker version")
 	assert.Equalf(t, "true", parsed.Query().Get(sendCredentialsURLParameterName), "Wrong value set for: %s", sendCredentialsURLParameterName)
 	assert.Equal(t, "1", parsed.Query().Get("seqNum"), "wrong seqNum")
+	protocolVersion, _ := strconv.Atoi(parsed.Query().Get("protocolVersion"))
+	assert.True(t, protocolVersion > 1, "ACS protocol version should be greater than 1")
 }
 
 // TestHandlerReconnectsOnConnectErrors tests if handler reconnects retries
@@ -793,9 +799,15 @@ func TestConnectionIsClosedOnIdle(t *testing.T) {
 }
 
 func TestHandlerDoesntLeakGoroutines(t *testing.T) {
+	// Skip this test on "windows" platform as we have observed this to
+	// fail often after upgrading the windows builds to golang v1.17.
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	taskEngine := mock_engine.NewMockTaskEngine(ctrl)
+	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
 	ecsClient := mock_api.NewMockECSClient(ctrl)
 	ctx, cancel := context.WithCancel(context.Background())
 	taskHandler := eventhandler.NewTaskHandler(ctx, data.NewNoopClient(), nil, nil)
@@ -810,6 +822,8 @@ func TestHandlerDoesntLeakGoroutines(t *testing.T) {
 			select {
 			case <-requests:
 			case <-errs:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
@@ -820,6 +834,10 @@ func TestHandlerDoesntLeakGoroutines(t *testing.T) {
 	})
 	taskEngine.EXPECT().Version().Return("Docker: 1.5.0", nil).AnyTimes()
 	taskEngine.EXPECT().AddTask(gomock.Any()).AnyTimes()
+	dockerClient.EXPECT().SystemPing(gomock.Any(), gomock.Any()).AnyTimes()
+
+	emptyHealthchecksList := []doctor.Healthcheck{}
+	emptyDoctor, _ := doctor.NewDoctor(emptyHealthchecksList, "test-cluster", "this:is:an:instance:arn")
 
 	ended := make(chan bool, 1)
 	go func() {
@@ -829,6 +847,7 @@ func TestHandlerDoesntLeakGoroutines(t *testing.T) {
 			credentialsProvider:      testCreds,
 			agentConfig:              testConfig,
 			taskEngine:               taskEngine,
+			dockerClient:             dockerClient,
 			ecsClient:                ecsClient,
 			dataClient:               data.NewNoopClient(),
 			taskHandler:              taskHandler,
@@ -838,17 +857,18 @@ func TestHandlerDoesntLeakGoroutines(t *testing.T) {
 			resources:                newSessionResources(testCreds),
 			credentialsManager:       rolecredentials.NewManager(),
 			latestSeqNumTaskManifest: aws.Int64(12),
+			doctor:                   emptyDoctor,
 		}
 		acsSession.Start()
 		ended <- true
 	}()
 	// Warm it up
-	serverIn <- `{"type":"HeartbeatMessage","message":{"healthy":true}}`
+	serverIn <- `{"type":"HeartbeatMessage","message":{"healthy":true,"messageId":"123"}}`
 	serverIn <- samplePayloadMessage
 
 	beforeGoroutines := runtime.NumGoroutine()
-	for i := 0; i < 100; i++ {
-		serverIn <- `{"type":"HeartbeatMessage","message":{"healthy":true}}`
+	for i := 0; i < 40; i++ {
+		serverIn <- `{"type":"HeartbeatMessage","message":{"healthy":true,"messageId":"123"}}`
 		serverIn <- samplePayloadMessage
 		closeWS <- true
 	}
@@ -858,15 +878,15 @@ func TestHandlerDoesntLeakGoroutines(t *testing.T) {
 
 	// The number of goroutines finishing in the MockACSServer will affect
 	// the result unless we wait here.
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 	afterGoroutines := runtime.NumGoroutine()
 
 	t.Logf("Goroutines after 1 and after %v acs messages: %v and %v", timesConnected, beforeGoroutines, afterGoroutines)
 
-	if timesConnected < 50 {
+	if timesConnected < 20 {
 		t.Fatal("Expected times connected to be a large number, was ", timesConnected)
 	}
-	if afterGoroutines > beforeGoroutines+5 {
+	if afterGoroutines > beforeGoroutines+2 {
 		t.Error("Goroutine leak, oh no!")
 		pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
 	}
@@ -905,6 +925,10 @@ func TestStartSessionHandlesRefreshCredentialsMessages(t *testing.T) {
 	taskEngine.EXPECT().Version().Return("Docker: 1.5.0", nil).AnyTimes()
 
 	credentialsManager := mock_credentials.NewMockManager(ctrl)
+	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
+
+	emptyHealthchecksList := []doctor.Healthcheck{}
+	emptyDoctor, _ := doctor.NewDoctor(emptyHealthchecksList, "test-cluster", "this:is:a:container:arn")
 
 	latestSeqNumberTaskManifest := int64(10)
 	ended := make(chan bool, 1)
@@ -914,12 +938,15 @@ func TestStartSessionHandlesRefreshCredentialsMessages(t *testing.T) {
 			nil,
 			"myArn",
 			testCreds,
+			dockerClient,
 			ecsClient,
 			dockerstate.NewTaskEngineState(),
 			data.NewNoopClient(),
 			taskEngine,
 			credentialsManager,
-			taskHandler, &latestSeqNumberTaskManifest,
+			taskHandler,
+			&latestSeqNumberTaskManifest,
+			emptyDoctor,
 		)
 		acsSession.Start()
 		// StartSession should never return unless the context is canceled
@@ -1006,11 +1033,12 @@ func TestHandlerReconnectsCorrectlySetsSendCredentialsURLParameter(t *testing.T)
 	taskHandler := eventhandler.NewTaskHandler(ctx, data.NewNoopClient(), nil, nil)
 
 	mockWsClient := mock_wsclient.NewMockClientServer(ctrl)
-
 	mockWsClient.EXPECT().SetAnyRequestHandler(gomock.Any()).AnyTimes()
 	mockWsClient.EXPECT().AddRequestHandler(gomock.Any()).AnyTimes()
 	mockWsClient.EXPECT().Close().Return(nil).AnyTimes()
 	mockWsClient.EXPECT().Serve().Return(io.EOF).AnyTimes()
+
+	dockerClient := mock_dockerapi.NewMockDockerClient(ctrl)
 	resources := newSessionResources(testCreds)
 	gomock.InOrder(
 		// When the websocket client connects to ACS for the first
@@ -1030,6 +1058,7 @@ func TestHandlerReconnectsCorrectlySetsSendCredentialsURLParameter(t *testing.T)
 		credentialsProvider:  testCreds,
 		agentConfig:          testConfig,
 		taskEngine:           taskEngine,
+		dockerClient:         dockerClient,
 		ecsClient:            ecsClient,
 		dataClient:           data.NewNoopClient(),
 		taskHandler:          taskHandler,

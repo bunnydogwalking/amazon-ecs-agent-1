@@ -87,9 +87,12 @@ const (
 	// has been created before it can be deleted
 	DefaultNonECSImageDeletionAge = 1 * time.Hour
 
+	//DefaultImagePullTimeout specifies the timeout for PullImage API.
+	DefaultImagePullTimeout = 2 * time.Hour
+
 	// minimumTaskCleanupWaitDuration specifies the minimum duration to wait before cleaning up
 	// a task's container. This is used to enforce sane values for the config.TaskCleanupWaitDuration field.
-	minimumTaskCleanupWaitDuration = 1 * time.Minute
+	minimumTaskCleanupWaitDuration = time.Second
 
 	// minimumImagePullInactivityTimeout specifies the minimum amount of time for that an image can be
 	// 'stuck' in the pull / unpack step. Very small values are unsafe and lead to high failure rate.
@@ -223,6 +226,14 @@ func NewConfig(ec2client ec2.EC2MetadataClient) (*Config, error) {
 	}
 	config := &envConfig
 
+	if config.External.Enabled() {
+		if config.AWSRegion == "" {
+			return nil, errors.New("AWS_DEFAULT_REGION has to be set when running on external capacity")
+		}
+		// Use fake ec2 metadata client if on prem config is set.
+		ec2client = ec2.NewBlackholeEC2MetadataClient()
+	}
+
 	if config.complete() {
 		// No need to do file / network IO
 		return config, nil
@@ -308,6 +319,10 @@ func (cfg *Config) validateAndOverrideBounds() error {
 	}
 	var badDrivers []string
 	for _, driver := range cfg.AvailableLoggingDrivers {
+		// Don't classify awsfirelens as a bad driver
+		if driver == dockerclient.AWSFirelensDriver {
+			continue
+		}
 		_, ok := dockerclient.LoggingDriverMinimumVersion[driver]
 		if !ok {
 			badDrivers = append(badDrivers, string(driver))
@@ -422,8 +437,11 @@ func (cfg *Config) complete() bool {
 }
 
 func fileConfig() (Config, error) {
-	fileName := utils.DefaultIfBlank(os.Getenv("ECS_AGENT_CONFIG_FILE_PATH"), defaultConfigFileName)
 	cfg := Config{}
+	fileName, err := getConfigFileName()
+	if err != nil {
+		return cfg, nil
+	}
 
 	file, err := os.Open(fileName)
 	if err != nil {
@@ -524,13 +542,17 @@ func environmentConfig() (Config, error) {
 		SELinuxCapable:                      parseBooleanDefaultFalseConfig("ECS_SELINUX_CAPABLE"),
 		AppArmorCapable:                     parseBooleanDefaultFalseConfig("ECS_APPARMOR_CAPABLE"),
 		TaskCleanupWaitDuration:             parseEnvVariableDuration("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION"),
+		TaskCleanupWaitDurationJitter:       parseEnvVariableDuration("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION_JITTER"),
 		TaskENIEnabled:                      parseBooleanDefaultFalseConfig("ECS_ENABLE_TASK_ENI"),
 		TaskIAMRoleEnabled:                  parseBooleanDefaultFalseConfig("ECS_ENABLE_TASK_IAM_ROLE"),
 		DeleteNonECSImagesEnabled:           parseBooleanDefaultFalseConfig("ECS_ENABLE_UNTRACKED_IMAGE_CLEANUP"),
 		TaskCPUMemLimit:                     parseBooleanDefaultTrueConfig("ECS_ENABLE_TASK_CPU_MEM_LIMIT"),
 		DockerStopTimeout:                   parseDockerStopTimeout(),
 		ContainerStartTimeout:               parseContainerStartTimeout(),
+		ContainerCreateTimeout:              parseContainerCreateTimeout(),
+		DependentContainersPullUpfront:      parseBooleanDefaultFalseConfig("ECS_PULL_DEPENDENT_CONTAINERS_UPFRONT"),
 		ImagePullInactivityTimeout:          parseImagePullInactivityTimeout(),
+		ImagePullTimeout:                    parseEnvVariableDuration("ECS_IMAGE_PULL_TIMEOUT"),
 		CredentialsAuditLogFile:             os.Getenv("ECS_AUDIT_LOGFILE"),
 		CredentialsAuditLogDisabled:         utils.ParseBool(os.Getenv("ECS_AUDIT_LOGFILE_DISABLED"), false),
 		TaskIAMRoleEnabledForNetworkHost:    utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST"), false),
@@ -555,7 +577,7 @@ func environmentConfig() (Config, error) {
 		SharedVolumeMatchFullConfig:         parseBooleanDefaultFalseConfig("ECS_SHARED_VOLUME_MATCH_FULL_CONFIG"),
 		ContainerInstanceTags:               containerInstanceTags,
 		ContainerInstancePropagateTagsFrom:  parseContainerInstancePropagateTagsFrom(),
-		PollMetrics:                         parseBooleanDefaultTrueConfig("ECS_POLL_METRICS"),
+		PollMetrics:                         parseBooleanDefaultFalseConfig("ECS_POLL_METRICS"),
 		PollingMetricsWaitDuration:          parseEnvVariableDuration("ECS_POLLING_METRICS_WAIT_DURATION"),
 		DisableDockerHealthCheck:            parseBooleanDefaultFalseConfig("ECS_DISABLE_DOCKER_HEALTH_CHECK"),
 		GPUSupportEnabled:                   utils.ParseBool(os.Getenv("ECS_ENABLE_GPU_SUPPORT"), false),
@@ -566,6 +588,10 @@ func environmentConfig() (Config, error) {
 		SpotInstanceDrainingEnabled:         parseBooleanDefaultFalseConfig("ECS_ENABLE_SPOT_INSTANCE_DRAINING"),
 		GMSACapable:                         parseGMSACapability(),
 		VolumePluginCapabilities:            parseVolumePluginCapabilities(),
+		FSxWindowsFileServerCapable:         parseFSxWindowsFileServerCapability(),
+		External:                            parseBooleanDefaultFalseConfig("ECS_EXTERNAL"),
+		EnableRuntimeStats:                  parseBooleanDefaultFalseConfig("ECS_ENABLE_RUNTIME_STATS"),
+		ShouldExcludeIPv6PortBinding:        parseBooleanDefaultTrueConfig("ECS_EXCLUDE_IPV6_PORTBINDING"),
 	}, err
 }
 
@@ -595,7 +621,10 @@ func (cfg *Config) String() string {
 			"TaskCleanupWaitDuration: %v, "+
 			"DockerStopTimeout: %v, "+
 			"ContainerStartTimeout: %v, "+
+			"ContainerCreateTimeout: %v, "+
+			"DependentContainersPullUpfront: %v, "+
 			"TaskCPUMemLimit: %v, "+
+			"ShouldExcludeIPv6PortBinding: %v, "+
 			"%s",
 		cfg.Cluster,
 		cfg.AWSRegion,
@@ -610,7 +639,10 @@ func (cfg *Config) String() string {
 		cfg.TaskCleanupWaitDuration,
 		cfg.DockerStopTimeout,
 		cfg.ContainerStartTimeout,
+		cfg.ContainerCreateTimeout,
+		cfg.DependentContainersPullUpfront,
 		cfg.TaskCPUMemLimit,
+		cfg.ShouldExcludeIPv6PortBinding,
 		cfg.platformString(),
 	)
 }

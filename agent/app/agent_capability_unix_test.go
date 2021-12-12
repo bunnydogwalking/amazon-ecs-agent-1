@@ -1,4 +1,4 @@
-// +build linux,unit
+//go:build linux && unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -40,6 +40,10 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 )
+
+func init() {
+	mockPathExists(false)
+}
 
 func TestVolumeDriverCapabilitiesUnix(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -307,6 +311,7 @@ func TestENITrunkingCapabilitiesUnix(t *testing.T) {
 		capabilityPrefix + "docker-remote-api.1.17",
 		attributePrefix + "docker-plugin.local",
 		attributePrefix + taskENIAttributeSuffix,
+		attributePrefix + taskENIIPv6AttributeSuffix,
 		attributePrefix + taskENITrunkingAttributeSuffix,
 		attributePrefix + taskENITrunkingAttributeSuffix,
 		attributePrefix + capabilityPrivateRegistryAuthASM,
@@ -389,6 +394,7 @@ func TestNoENITrunkingCapabilitiesUnix(t *testing.T) {
 		capabilityPrefix + "docker-remote-api.1.17",
 		attributePrefix + "docker-plugin.local",
 		attributePrefix + taskENIAttributeSuffix,
+		attributePrefix + taskENIIPv6AttributeSuffix,
 		attributePrefix + capabilityPrivateRegistryAuthASM,
 		attributePrefix + capabilitySecretEnvSSM,
 		attributePrefix + capabilitySecretLogDriverSSM,
@@ -773,6 +779,7 @@ func TestCapabilitiesUnix(t *testing.T) {
 		attributePrefix + capabilityEFS,
 		attributePrefix + capabilityEFSAuth,
 		capabilityPrefix + capabilityFirelensLoggingDriver,
+		attributePrefix + capabilityFirelensLoggingDriver + capabilityFireLensLoggingDriverConfigBufferLimitSuffix,
 		attributePrefix + capabilityEnvFilesS3,
 	}
 
@@ -851,6 +858,16 @@ func TestAppendGMSACapabilities(t *testing.T) {
 	agent := &ecsAgent{}
 
 	capabilities := agent.appendGMSACapabilities(inputCapabilities)
+	assert.Equal(t, len(inputCapabilities), len(capabilities))
+	assert.EqualValues(t, capabilities, inputCapabilities)
+}
+
+func TestAppendFSxWindowsFileServerCapabilities(t *testing.T) {
+	var inputCapabilities []*ecs.Attribute
+
+	agent := &ecsAgent{}
+
+	capabilities := agent.appendFSxWindowsFileServerCapabilities(inputCapabilities)
 	assert.Equal(t, len(inputCapabilities), len(capabilities))
 	assert.EqualValues(t, capabilities, inputCapabilities)
 }

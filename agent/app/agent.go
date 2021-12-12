@@ -20,6 +20,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/agent/doctor"
+	"github.com/aws/amazon-ecs-agent/agent/eni/watcher"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+
+	"github.com/aws/amazon-ecs-agent/agent/credentials/instancecreds"
+	"github.com/aws/amazon-ecs-agent/agent/engine/execcmd"
 	"github.com/aws/amazon-ecs-agent/agent/metrics"
 
 	acshandler "github.com/aws/amazon-ecs-agent/agent/acs/handler"
@@ -40,7 +46,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/engine"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/eni/pause"
-	"github.com/aws/amazon-ecs-agent/agent/eni/udevwrapper"
 	"github.com/aws/amazon-ecs-agent/agent/eventhandler"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/handlers"
@@ -52,10 +57,10 @@ import (
 	tcshandler "github.com/aws/amazon-ecs-agent/agent/tcs/handler"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/amazon-ecs-agent/agent/utils/mobypkgwrapper"
+	"github.com/aws/amazon-ecs-agent/agent/utils/retry"
 	"github.com/aws/amazon-ecs-agent/agent/version"
 	"github.com/aws/aws-sdk-go/aws"
 	aws_credentials "github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/defaults"
 	"github.com/cihub/seelog"
 	"github.com/pborman/uuid"
 )
@@ -66,9 +71,18 @@ const (
 	clusterMismatchErrorFormat                 = "Data mismatch; saved cluster '%v' does not match configured cluster '%v'. Perhaps you want to delete the configured checkpoint file?"
 	instanceIDMismatchErrorFormat              = "Data mismatch; saved InstanceID '%s' does not match current InstanceID '%s'. Overwriting old datafile"
 	instanceTypeMismatchErrorFormat            = "The current instance type does not match the registered instance type. Please revert the instance type change, or alternatively launch a new instance: %v"
+	customAttributeErrorMessage                = " Please make sure custom attributes are valid as per public AWS documentation: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-placement-constraints.html#attributes"
 
 	vpcIDAttributeName    = "ecs.vpc-id"
 	subnetIDAttributeName = "ecs.subnet-id"
+
+	blackholed = "blackholed"
+
+	instanceIdBackoffMin      = time.Second
+	instanceIdBackoffMax      = time.Second * 5
+	instanceIdBackoffJitter   = 0.2
+	instanceIdBackoffMultiple = 1.3
+	instanceIdMaxRetryCount   = 3
 )
 
 var (
@@ -88,6 +102,8 @@ type agent interface {
 	start() int
 	// setTerminationHandler sets the termination handler
 	setTerminationHandler(sighandlers.TerminationHandler)
+	// getConfig gets the agent configuration
+	getConfig() *config.Config
 }
 
 // ecsAgent wraps all the entities needed to start the ECS Agent execution.
@@ -106,7 +122,7 @@ type ecsAgent struct {
 	stateManagerFactory         factory.StateManager
 	saveableOptionFactory       factory.SaveableOption
 	pauseLoader                 pause.Loader
-	udevMonitor                 udevwrapper.Udev
+	eniWatcher                  *watcher.ENIWatcher
 	cniClient                   ecscni.CNIClient
 	vpc                         string
 	subnet                      string
@@ -142,6 +158,12 @@ func newAgent(blackholeEC2Metadata bool, acceptInsecureCert *bool) (agent, error
 	}
 	seelog.Infof("Amazon ECS agent Version: %s, Commit: %s", version.Version, version.GitShortHash)
 	seelog.Debugf("Loaded config: %s", cfg.String())
+
+	if cfg.External.Enabled() {
+		seelog.Info("Running in external mode.")
+		ec2MetadataClient = ec2.NewBlackholeEC2MetadataClient()
+		cfg.NoIID = true
+	}
 
 	ec2Client := ec2.NewClientImpl(cfg.AWSRegion)
 	dockerClient, err := dockerapi.NewDockerGoClient(sdkclientfactory.NewFactory(ctx, cfg.DockerEndpoint), cfg, ctx)
@@ -185,7 +207,7 @@ func newAgent(blackholeEC2Metadata bool, acceptInsecureCert *bool) (agent, error
 		// We instantiate our own credentialProvider for use in acs/tcs. This tries
 		// to mimic roughly the way it's instantiated by the SDK for a default
 		// session.
-		credentialProvider:          defaults.CredChain(defaults.Config(), defaults.Handlers()),
+		credentialProvider:          instancecreds.GetCredentials(),
 		stateManagerFactory:         factory.NewStateManager(),
 		saveableOptionFactory:       factory.NewSaveableOption(),
 		pauseLoader:                 pause.New(),
@@ -195,6 +217,10 @@ func newAgent(blackholeEC2Metadata bool, acceptInsecureCert *bool) (agent, error
 		mobyPlugins:                 mobypkgwrapper.NewPlugins(),
 		latestSeqNumberTaskManifest: &initialSeqNumber,
 	}, nil
+}
+
+func (agent *ecsAgent) getConfig() *config.Config {
+	return agent.cfg
 }
 
 // printECSAttributes prints the Agent's ECS Attributes based on its
@@ -226,7 +252,7 @@ func (agent *ecsAgent) start() int {
 	client := ecsclient.NewECSClient(agent.credentialProvider, agent.cfg, agent.ec2MetadataClient)
 
 	agent.initializeResourceFields(credentialsManager)
-	return agent.doStart(containerChangeEventStream, credentialsManager, state, imageManager, client)
+	return agent.doStart(containerChangeEventStream, credentialsManager, state, imageManager, client, execcmd.NewManager())
 }
 
 // doStart is the worker invoked by start for starting the ECS Agent. This involves
@@ -236,7 +262,8 @@ func (agent *ecsAgent) doStart(containerChangeEventStream *eventstream.EventStre
 	credentialsManager credentials.Manager,
 	state dockerstate.TaskEngineState,
 	imageManager engine.ImageManager,
-	client api.ECSClient) int {
+	client api.ECSClient,
+	execCmdMgr execcmd.Manager) int {
 	// check docker version >= 1.9.0, exit agent if older
 	if exitcode, ok := agent.verifyRequiredDockerVersion(); !ok {
 		return exitcode
@@ -259,7 +286,7 @@ func (agent *ecsAgent) doStart(containerChangeEventStream *eventstream.EventStre
 
 	// Create the task engine
 	taskEngine, currentEC2InstanceID, err := agent.newTaskEngine(containerChangeEventStream,
-		credentialsManager, state, imageManager)
+		credentialsManager, state, imageManager, execCmdMgr)
 	if err != nil {
 		seelog.Criticalf("Unable to initialize new task engine: %v", err)
 		return exitcodes.ExitTerminal
@@ -332,6 +359,15 @@ func (agent *ecsAgent) doStart(containerChangeEventStream *eventstream.EventStre
 		agent.saveMetadata(data.EC2InstanceIDKey, currentEC2InstanceID)
 	}
 
+	// now that we know the container instance ARN, we can build out the doctor
+	// and pass it on to ACS and TACS
+	doctor, doctorCreateErr := agent.newDoctorWithHealthchecks(agent.cfg.Cluster, agent.containerInstanceARN)
+	if doctorCreateErr != nil {
+		seelog.Warnf("Error starting doctor, healthchecks won't be running: %v", err)
+	} else {
+		seelog.Debug("Doctor healthchecks set up properly.")
+	}
+
 	// Begin listening to the docker daemon and saving changes
 	taskEngine.SetDataClient(agent.dataClient)
 	imageManager.SetDataClient(agent.dataClient)
@@ -344,11 +380,11 @@ func (agent *ecsAgent) doStart(containerChangeEventStream *eventstream.EventStre
 	taskHandler := eventhandler.NewTaskHandler(agent.ctx, agent.dataClient, state, client)
 	attachmentEventHandler := eventhandler.NewAttachmentEventHandler(agent.ctx, agent.dataClient, client)
 	agent.startAsyncRoutines(containerChangeEventStream, credentialsManager, imageManager,
-		taskEngine, deregisterInstanceEventStream, client, taskHandler, attachmentEventHandler, state)
+		taskEngine, deregisterInstanceEventStream, client, taskHandler, attachmentEventHandler, state, doctor)
 
 	// Start the acs session, which should block doStart
 	return agent.startACSSession(credentialsManager, taskEngine,
-		deregisterInstanceEventStream, client, state, taskHandler)
+		deregisterInstanceEventStream, client, state, taskHandler, doctor)
 }
 
 // newTaskEngine creates a new docker task engine object. It tries to load the
@@ -356,7 +392,8 @@ func (agent *ecsAgent) doStart(containerChangeEventStream *eventstream.EventStre
 func (agent *ecsAgent) newTaskEngine(containerChangeEventStream *eventstream.EventStream,
 	credentialsManager credentials.Manager,
 	state dockerstate.TaskEngineState,
-	imageManager engine.ImageManager) (engine.TaskEngine, string, error) {
+	imageManager engine.ImageManager,
+	execCmdMgr execcmd.Manager) (engine.TaskEngine, string, error) {
 
 	containerChangeEventStream.StartListening()
 
@@ -364,10 +401,10 @@ func (agent *ecsAgent) newTaskEngine(containerChangeEventStream *eventstream.Eve
 		seelog.Info("Checkpointing not enabled; a new container instance will be created each time the agent is run")
 		return engine.NewTaskEngine(agent.cfg, agent.dockerClient, credentialsManager,
 			containerChangeEventStream, imageManager, state,
-			agent.metadataManager, agent.resourceFields), "", nil
+			agent.metadataManager, agent.resourceFields, execCmdMgr), "", nil
 	}
 
-	savedData, err := agent.loadData(containerChangeEventStream, credentialsManager, state, imageManager)
+	savedData, err := agent.loadData(containerChangeEventStream, credentialsManager, state, imageManager, execCmdMgr)
 	if err != nil {
 		seelog.Criticalf("Error loading previously saved state: %v", err)
 		return nil, "", err
@@ -389,7 +426,7 @@ func (agent *ecsAgent) newTaskEngine(containerChangeEventStream *eventstream.Eve
 		// Reset taskEngine; all the other values are still default
 		return engine.NewTaskEngine(agent.cfg, agent.dockerClient, credentialsManager,
 			containerChangeEventStream, imageManager, state, agent.metadataManager,
-			agent.resourceFields), currentEC2InstanceID, nil
+			agent.resourceFields, execCmdMgr), currentEC2InstanceID, nil
 	}
 
 	if savedData.cluster != "" {
@@ -420,6 +457,21 @@ func (agent *ecsAgent) initMetricsEngine() {
 	metrics.PublishMetrics()
 }
 
+// newDoctorWithHealthchecks creates a new doctor and also configures
+// the healthchecks that the doctor should be running
+func (agent *ecsAgent) newDoctorWithHealthchecks(cluster, containerInstanceARN string) (*doctor.Doctor, error) {
+	// configure the required healthchecks
+	runtimeHealthCheck := doctor.NewDockerRuntimeHealthcheck(agent.dockerClient)
+
+	// put the healthechecks in a list
+	healthcheckList := []doctor.Healthcheck{
+		runtimeHealthCheck,
+	}
+
+	// set up the doctor and return it
+	return doctor.NewDoctor(healthcheckList, cluster, containerInstanceARN)
+}
+
 // setClusterInConfig sets the cluster name in the config object based on
 // previous state. It returns an error if there's a mismatch between the
 // the current cluster name with what's restored from the cluster state
@@ -445,11 +497,21 @@ func (agent *ecsAgent) setClusterInConfig(previousCluster string) error {
 
 // getEC2InstanceID gets the EC2 instance ID from the metadata service
 func (agent *ecsAgent) getEC2InstanceID() string {
-	instanceID, err := agent.ec2MetadataClient.InstanceID()
+	var instanceID string
+	var err error
+	backoff := retry.NewExponentialBackoff(instanceIdBackoffMin, instanceIdBackoffMax, instanceIdBackoffJitter, instanceIdBackoffMultiple)
+	for i := 0; i < instanceIdMaxRetryCount; i++ {
+		instanceID, err = agent.ec2MetadataClient.InstanceID()
+		if err == nil || err.Error() == blackholed {
+			return instanceID
+		}
+		if i < instanceIdMaxRetryCount-1 {
+			time.Sleep(backoff.Duration())
+		}
+	}
 	if err != nil {
 		seelog.Warnf(
 			"Unable to access EC2 Metadata service to determine EC2 ID: %v", err)
-		return ""
 	}
 	return instanceID
 }
@@ -511,7 +573,7 @@ func (agent *ecsAgent) registerContainerInstance(
 	additionalAttributes []*ecs.Attribute) error {
 	// Preflight request to make sure they're good
 	if preflightCreds, err := agent.credentialProvider.Get(); err != nil || preflightCreds.AccessKeyID == "" {
-		seelog.Warnf("Error getting valid credentials (AKID %s): %v", preflightCreds.AccessKeyID, err)
+		seelog.Errorf("Error getting valid credentials: %s", err)
 	}
 
 	agentCapabilities, err := agent.capabilities()
@@ -556,7 +618,11 @@ func (agent *ecsAgent) registerContainerInstance(
 			return err
 		}
 		if _, ok := err.(apierrors.AttributeError); ok {
-			seelog.Critical("Instance registration attempt with an invalid attribute")
+			attributeErrorMsg := ""
+			if len(agent.cfg.InstanceAttributes) > 0 {
+				attributeErrorMsg = customAttributeErrorMessage
+			}
+			seelog.Critical("Instance registration attempt with invalid attribute(s)." + attributeErrorMsg)
 			return err
 		}
 		return transientError{err}
@@ -587,7 +653,11 @@ func (agent *ecsAgent) reregisterContainerInstance(client api.ECSClient, capabil
 		return err
 	}
 	if _, ok := err.(apierrors.AttributeError); ok {
-		seelog.Critical("Instance re-registration attempt with an invalid attribute")
+		attributeErrorMsg := ""
+		if len(agent.cfg.InstanceAttributes) > 0 {
+			attributeErrorMsg = customAttributeErrorMessage
+		}
+		seelog.Critical("Instance re-registration attempt with invalid attribute(s)." + attributeErrorMsg)
 		return err
 	}
 	return transientError{err}
@@ -603,7 +673,9 @@ func (agent *ecsAgent) startAsyncRoutines(
 	client api.ECSClient,
 	taskHandler *eventhandler.TaskHandler,
 	attachmentEventHandler *eventhandler.AttachmentEventHandler,
-	state dockerstate.TaskEngineState) {
+	state dockerstate.TaskEngineState,
+	doctor *doctor.Doctor,
+) {
 
 	// Start of the periodic image cleanup process
 	if !agent.cfg.ImageCleanupDisabled.Enabled() {
@@ -642,6 +714,7 @@ func (agent *ecsAgent) startAsyncRoutines(
 		ECSClient:                     client,
 		TaskEngine:                    taskEngine,
 		StatsEngine:                   statsEngine,
+		Doctor:                        doctor,
 	}
 
 	// Start metrics session in a go routine
@@ -703,7 +776,8 @@ func (agent *ecsAgent) startACSSession(
 	deregisterInstanceEventStream *eventstream.EventStream,
 	client api.ECSClient,
 	state dockerstate.TaskEngineState,
-	taskHandler *eventhandler.TaskHandler) int {
+	taskHandler *eventhandler.TaskHandler,
+	doctor *doctor.Doctor) int {
 
 	acsSession := acshandler.NewSession(
 		agent.ctx,
@@ -711,6 +785,7 @@ func (agent *ecsAgent) startACSSession(
 		deregisterInstanceEventStream,
 		agent.containerInstanceARN,
 		agent.credentialProvider,
+		agent.dockerClient,
 		client,
 		state,
 		agent.dataClient,
@@ -718,6 +793,7 @@ func (agent *ecsAgent) startACSSession(
 		credentialsManager,
 		taskHandler,
 		agent.latestSeqNumberTaskManifest,
+		doctor,
 	)
 	seelog.Info("Beginning Polling for updates")
 	err := acsSession.Start()
@@ -807,4 +883,53 @@ func (agent *ecsAgent) saveMetadata(key, val string) {
 	if err != nil {
 		seelog.Errorf("Failed to save agent metadata to disk (key: [%s], value: [%s]): %v", key, val, err)
 	}
+}
+
+// setVPCSubnet sets the vpc and subnet ids for the agent by querying the
+// instance metadata service
+func (agent *ecsAgent) setVPCSubnet() (error, bool) {
+	mac, err := agent.ec2MetadataClient.PrimaryENIMAC()
+	if err != nil {
+		return fmt.Errorf("unable to get mac address of instance's primary ENI from instance metadata: %v", err), false
+	}
+
+	vpcID, err := agent.ec2MetadataClient.VPCID(mac)
+	if err != nil {
+		if isInstanceLaunchedInVPC(err) {
+			return fmt.Errorf("unable to get vpc id from instance metadata: %v", err), true
+		}
+		return instanceNotLaunchedInVPCError, false
+	}
+
+	subnetID, err := agent.ec2MetadataClient.SubnetID(mac)
+	if err != nil {
+		return fmt.Errorf("unable to get subnet id from instance metadata: %v", err), false
+	}
+
+	agent.vpc = vpcID
+	agent.subnet = subnetID
+	agent.mac = mac
+
+	return nil, false
+}
+
+// isInstanceLaunchedInVPC returns false when the awserr returned is an EC2MetadataError
+// when querying the vpc id from instance metadata
+func isInstanceLaunchedInVPC(err error) bool {
+	if aerr, ok := err.(awserr.Error); ok &&
+		aerr.Code() == "EC2MetadataError" {
+		return false
+	}
+	return true
+}
+
+// contains is a comparision function which checks if the target string is present in the array
+func contains(capabilities []string, capability string) bool {
+	for _, cap := range capabilities {
+		if cap == capability {
+			return true
+		}
+	}
+
+	return false
 }

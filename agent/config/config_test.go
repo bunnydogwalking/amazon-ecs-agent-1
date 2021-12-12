@@ -1,4 +1,4 @@
-// +build unit
+//go:build unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -29,6 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMerge(t *testing.T) {
@@ -113,18 +114,27 @@ func TestGetRegionWithNoIID(t *testing.T) {
 }
 
 func TestEnvironmentConfig(t *testing.T) {
+	const (
+		testTaskCleanupWaitDurationStr       = "90s"
+		testTaskCleanupWaitDurationJitterStr = "1m"
+		testTaskCleanupWaitDuration          = 90 * time.Second
+		testTaskCleanupWaitDurationJitter    = time.Minute
+	)
+
 	defer setTestRegion()()
 	defer setTestEnv("ECS_CLUSTER", "myCluster")()
 	defer setTestEnv("ECS_RESERVED_PORTS_UDP", "[42,99]")()
 	defer setTestEnv("ECS_RESERVED_MEMORY", "20")()
 	defer setTestEnv("ECS_CONTAINER_STOP_TIMEOUT", "60s")()
 	defer setTestEnv("ECS_CONTAINER_START_TIMEOUT", "5m")()
+	defer setTestEnv("ECS_CONTAINER_CREATE_TIMEOUT", "4m")()
 	defer setTestEnv("ECS_IMAGE_PULL_INACTIVITY_TIMEOUT", "10m")()
 	defer setTestEnv("ECS_AVAILABLE_LOGGING_DRIVERS", "[\""+string(dockerclient.SyslogDriver)+"\"]")()
 	defer setTestEnv("ECS_SELINUX_CAPABLE", "true")()
 	defer setTestEnv("ECS_APPARMOR_CAPABLE", "true")()
 	defer setTestEnv("ECS_DISABLE_PRIVILEGED", "true")()
-	defer setTestEnv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION", "90s")()
+	defer setTestEnv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION", testTaskCleanupWaitDurationStr)()
+	defer setTestEnv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION_JITTER", testTaskCleanupWaitDurationJitterStr)()
 	defer setTestEnv("ECS_ENABLE_TASK_IAM_ROLE", "true")()
 	defer setTestEnv("ECS_ENABLE_UNTRACKED_IMAGE_CLEANUP", "true")()
 	defer setTestEnv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST", "true")()
@@ -145,6 +155,9 @@ func TestEnvironmentConfig(t *testing.T) {
 	defer setTestEnv("ECS_POLL_METRICS", "true")()
 	defer setTestEnv("ECS_POLLING_METRICS_WAIT_DURATION", "10s")()
 	defer setTestEnv("ECS_CGROUP_CPU_PERIOD", "")
+	defer setTestEnv("ECS_PULL_DEPENDENT_CONTAINERS_UPFRONT", "true")()
+	defer setTestEnv("ECS_ENABLE_RUNTIME_STATS", "true")()
+	defer setTestEnv("ECS_EXCLUDE_IPV6_PORTBINDING", "true")()
 	additionalLocalRoutesJSON := `["1.2.3.4/22","5.6.7.8/32"]`
 	setTestEnv("ECS_AWSVPC_ADDITIONAL_LOCAL_ROUTES", additionalLocalRoutesJSON)
 	setTestEnv("ECS_ENABLE_CONTAINER_METADATA", "true")
@@ -163,6 +176,8 @@ func TestEnvironmentConfig(t *testing.T) {
 	assert.Equal(t, expectedDurationDockerStopTimeout, conf.DockerStopTimeout)
 	expectedDurationContainerStartTimeout, _ := time.ParseDuration("5m")
 	assert.Equal(t, expectedDurationContainerStartTimeout, conf.ContainerStartTimeout)
+	expectedDurationContainerCreateTimeout, _ := time.ParseDuration("4m")
+	assert.Equal(t, expectedDurationContainerCreateTimeout, conf.ContainerCreateTimeout)
 	assert.Equal(t, []dockerclient.LoggingDriver{dockerclient.SyslogDriver}, conf.AvailableLoggingDrivers)
 	assert.True(t, conf.PrivilegedDisabled.Enabled())
 	assert.True(t, conf.SELinuxCapable.Enabled(), "Wrong value for SELinuxCapable")
@@ -182,7 +197,8 @@ func TestEnvironmentConfig(t *testing.T) {
 	assert.Equal(t, ImagePullAlwaysBehavior, conf.ImagePullBehavior)
 	assert.Equal(t, "testing", conf.InstanceAttributes["my_attribute"])
 	assert.Equal(t, "testing", conf.ContainerInstanceTags["my_tag"])
-	assert.Equal(t, (90 * time.Second), conf.TaskCleanupWaitDuration)
+	assert.Equal(t, testTaskCleanupWaitDuration, conf.TaskCleanupWaitDuration)
+	assert.Equal(t, testTaskCleanupWaitDurationJitter, conf.TaskCleanupWaitDurationJitter)
 	serializedAdditionalLocalRoutesJSON, err := json.Marshal(conf.AWSVPCAdditionalLocalRoutes)
 	assert.NoError(t, err, "should marshal additional local routes")
 	assert.Equal(t, additionalLocalRoutesJSON, string(serializedAdditionalLocalRoutesJSON))
@@ -197,6 +213,9 @@ func TestEnvironmentConfig(t *testing.T) {
 	assert.Equal(t, 10*time.Millisecond, conf.CgroupCPUPeriod)
 	assert.False(t, conf.SpotInstanceDrainingEnabled.Enabled())
 	assert.Equal(t, []string{"efsAuth"}, conf.VolumePluginCapabilities)
+	assert.True(t, conf.DependentContainersPullUpfront.Enabled(), "Wrong value for DependentContainersPullUpfront")
+	assert.True(t, conf.EnableRuntimeStats.Enabled(), "Wrong value for EnableRuntimeStats")
+	assert.True(t, conf.ShouldExcludeIPv6PortBinding.Enabled(), "Wrong value for ShouldExcludeIPv6PortBinding")
 }
 
 func TestTrimWhitespaceWhenCreating(t *testing.T) {
@@ -262,16 +281,24 @@ func TestInvalidLoggingDriver(t *testing.T) {
 	assert.Error(t, conf.validateAndOverrideBounds(), "Should be error with invalid-logging-driver")
 }
 
+func TestAwsFirelensLoggingDriver(t *testing.T) {
+	conf := DefaultConfig()
+	conf.AWSRegion = "us-west-2"
+	conf.AvailableLoggingDrivers = []dockerclient.LoggingDriver{"awsfirelens"}
+	assert.NoError(t, conf.validateAndOverrideBounds(), "awsfirelens is a valid logging driver, no error was expected")
+}
+
 func TestDefaultPollMetricsWithoutECSDataDir(t *testing.T) {
 	conf, err := environmentConfig()
 	assert.NoError(t, err)
-	assert.True(t, conf.PollMetrics.Enabled())
+	assert.False(t, conf.PollMetrics.Enabled())
 }
 
 func TestDefaultCheckpointWithoutECSDataDir(t *testing.T) {
 	conf, err := environmentConfig()
 	assert.NoError(t, err)
 	assert.False(t, conf.Checkpoint.Enabled())
+	assert.Equal(t, NotSet, conf.Checkpoint.Value)
 }
 
 func TestDefaultCheckpointWithECSDataDir(t *testing.T) {
@@ -320,6 +347,14 @@ func TestInvalidFormatContainerStartTimeout(t *testing.T) {
 	assert.Equal(t, defaultContainerStartTimeout, conf.ContainerStartTimeout, "Wrong value for ContainerStartTimeout")
 }
 
+func TestInvalidFormatContainerCreateTimeout(t *testing.T) {
+	defer setTestRegion()()
+	defer setTestEnv("ECS_CONTAINER_CREATE_TIMEOUT", "invalid")()
+	conf, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	assert.NoError(t, err)
+	assert.Equal(t, defaultContainerCreateTimeout, conf.ContainerCreateTimeout, "Wrong value for ContainerCreateTimeout")
+}
+
 func TestInvalidFormatDockerInactivityTimeout(t *testing.T) {
 	defer setTestRegion()()
 	defer setTestEnv("ECS_IMAGE_PULL_INACTIVITY_TIMEOUT", "invalid")()
@@ -353,12 +388,28 @@ func TestZeroValueContainerStartTimeout(t *testing.T) {
 	assert.Equal(t, defaultContainerStartTimeout, conf.ContainerStartTimeout, "Wrong value for ContainerStartTimeout")
 }
 
+func TestZeroValueContainerCreateTimeout(t *testing.T) {
+	defer setTestRegion()()
+	defer setTestEnv("ECS_CONTAINER_CREATE_TIMEOUT", "0s")()
+	conf, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	assert.NoError(t, err)
+	assert.Equal(t, defaultContainerCreateTimeout, conf.ContainerCreateTimeout, "Wrong value for ContainerCreateTimeout")
+}
+
 func TestInvalidValueContainerStartTimeout(t *testing.T) {
 	defer setTestRegion()()
 	defer setTestEnv("ECS_CONTAINER_START_TIMEOUT", "-10s")()
 	conf, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
 	assert.NoError(t, err)
 	assert.Equal(t, minimumContainerStartTimeout, conf.ContainerStartTimeout, "Wrong value for ContainerStartTimeout")
+}
+
+func TestInvalidValueContainerCreateTimeout(t *testing.T) {
+	defer setTestRegion()()
+	defer setTestEnv("ECS_CONTAINER_CREATE_TIMEOUT", "-10s")()
+	conf, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	assert.NoError(t, err)
+	assert.Equal(t, minimumContainerCreateTimeout, conf.ContainerCreateTimeout, "Wrong value for ContainerCreataeTimeout")
 }
 
 func TestZeroValueDockerPullInactivityTimeout(t *testing.T) {
@@ -442,7 +493,7 @@ func TestValidFormatParseEnvVariableDuration(t *testing.T) {
 
 func TestInvalidTaskCleanupTimeoutOverridesToThreeHours(t *testing.T) {
 	defer setTestRegion()()
-	setTestEnv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION", "1s")
+	setTestEnv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION", "1ms")
 	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
 	assert.NoError(t, err)
 
@@ -548,6 +599,14 @@ func TestSharedVolumeMatchFullConfigEnabled(t *testing.T) {
 	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
 	assert.NoError(t, err)
 	assert.True(t, cfg.SharedVolumeMatchFullConfig.Enabled(), "Wrong value for SharedVolumeMatchFullConfig")
+}
+
+func TestEnableRuntimeStatsConfigEnabled(t *testing.T) {
+	defer setTestRegion()()
+	defer setTestEnv("ECS_ENABLE_RUNTIME_STATS", "true")()
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	assert.NoError(t, err)
+	assert.True(t, cfg.EnableRuntimeStats.Enabled(), "Wrong value for EnableRuntimeStats")
 }
 
 func TestParseImagePullBehavior(t *testing.T) {
@@ -805,6 +864,20 @@ func TestTaskMetadataAZDisabled(t *testing.T) {
 	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
 	assert.NoError(t, err)
 	assert.True(t, cfg.TaskMetadataAZDisabled, "Wrong value for TaskMetadataAZDisabled")
+}
+
+func TestExternalConfig(t *testing.T) {
+	defer setTestRegion()()
+	defer setTestEnv("ECS_EXTERNAL", "true")()
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	require.NoError(t, err)
+	assert.True(t, cfg.External.Enabled())
+}
+
+func TestExternalConfigMissingRegion(t *testing.T) {
+	defer setTestEnv("ECS_EXTERNAL", "true")()
+	_, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	assert.Error(t, err)
 }
 
 func setTestRegion() func() {

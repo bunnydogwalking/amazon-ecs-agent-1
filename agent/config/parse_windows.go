@@ -1,4 +1,4 @@
-// +build windows
+//go:build windows
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -17,6 +17,8 @@ package config
 
 import (
 	"os"
+	"os/exec"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -29,11 +31,32 @@ const (
 	// domain join check validation. This is useful for integration and
 	// functional-tests but should not be set for any non-test use-case.
 	envSkipDomainJoinCheck = "ZZZ_SKIP_DOMAIN_JOIN_CHECK_NOT_SUPPORTED_IN_PRODUCTION"
+
+	// envSkipWindowsServerVersionCheck is an environment setting that can be used
+	// to skip the windows server version check. This is useful for testing and
+	// should not be set for any non-test use-case.
+	envSkipWindowsServerVersionCheck = "ZZZ_SKIP_WINDOWS_SERVER_VERSION_CHECK_NOT_SUPPORTED_IN_PRODUCTION"
 )
 
 // parseGMSACapability is used to determine if gMSA support can be enabled
 func parseGMSACapability() bool {
 	envStatus := utils.ParseBool(os.Getenv("ECS_GMSA_SUPPORTED"), true)
+	return checkDomainJoinWithEnvOverride(envStatus)
+}
+
+// parseFSxWindowsFileServerCapability is used to determine if fsxWindowsFileServer support can be enabled
+func parseFSxWindowsFileServerCapability() bool {
+	// fsxwindowsfileserver is not supported on Windows 2016 and non-domain-joined container instances
+	status, err := IsWindows2016()
+	if err != nil || status == true {
+		return false
+	}
+
+	envStatus := utils.ParseBool(os.Getenv("ECS_FSX_WINDOWS_FILE_SERVER_SUPPORTED"), true)
+	return checkDomainJoinWithEnvOverride(envStatus)
+}
+
+func checkDomainJoinWithEnvOverride(envStatus bool) bool {
 	if envStatus {
 		// Check if domain join check override is present
 		skipDomainJoinCheck := utils.ParseBool(os.Getenv(envSkipDomainJoinCheck), false)
@@ -41,7 +64,7 @@ func parseGMSACapability() bool {
 			seelog.Debug("Skipping domain join validation based on environment override")
 			return true
 		}
-		// If gMSA feature is explicitly enabled, check if container instance is domain joined.
+		// check if container instance is domain joined.
 		// If container instance is not domain joined, explicitly disable feature configuration.
 		status, err := isDomainJoined()
 		if err == nil && status == true {
@@ -70,4 +93,27 @@ func isDomainJoined() (bool, error) {
 	}
 
 	return status == syscall.NetSetupDomainName, nil
+}
+
+// Making it visible for unit testing
+var execCommand = exec.Command
+
+var IsWindows2016 = func() (bool, error) {
+	// Check for environment override before proceeding.
+	envSkipWindowsServerVersionCheck := utils.ParseBool(os.Getenv(envSkipWindowsServerVersionCheck), false)
+	if envSkipWindowsServerVersionCheck {
+		seelog.Debug("Skipping windows server version check based on environment override")
+		return false, nil
+	}
+
+	cmd := "systeminfo | findstr /B /C:\"OS Name\""
+	out, err := execCommand("powershell", "-Command", cmd).CombinedOutput()
+	if err != nil {
+		return false, err
+	}
+
+	str := string(out)
+	isWS2016 := strings.Contains(str, "Microsoft Windows Server 2016 Datacenter")
+
+	return isWS2016, nil
 }

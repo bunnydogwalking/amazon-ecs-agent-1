@@ -2,8 +2,7 @@
 
 ![Amazon ECS logo](doc/ecs.png "Amazon ECS")
 
-[![Build Status](https://travis-ci.org/aws/amazon-ecs-agent.svg?branch=master)](https://travis-ci.org/aws/amazon-ecs-agent)
-
+![Build Status](https://github.com/aws/amazon-ecs-agent/workflows/Build/badge.svg?branch=dev)
 
 The Amazon ECS Container Agent is a component of Amazon Elastic Container Service
 ([Amazon ECS](http://aws.amazon.com/ecs/)) and is responsible for managing containers on behalf of Amazon ECS.
@@ -53,7 +52,7 @@ $ docker run --name ecs-agent \
 ### On Other Linux AMIs when awsvpc networking mode is enabled
 
 For the AWS VPC networking mode, ECS agent requires CNI plugin and dhclient to be available. ECS also needs the ecs-init to run as part of its startup.
-The following is an example of docker run configuration for running ecs-agent with Task ENI enabled
+The following is an example of docker run configuration for running ecs-agent with Task ENI enabled. Note that ECS agent currently only supports cgroupfs for cgroup driver.
 ```
 $ # Run the agent
 $ /usr/bin/docker run --name ecs-agent \
@@ -133,23 +132,26 @@ additional details on each available environment variable.
 | `AWS_SECRET_ACCESS_KEY` | EXAMPLEKEY | The [secret key](http://docs.aws.amazon.com/general/latest/gr/aws-security-credentials.html) used by the agent for all calls. | Taken from Amazon EC2 instance metadata. | Taken from Amazon EC2 instance metadata. |
 | `AWS_SESSION_TOKEN` | | The [session token](http://docs.aws.amazon.com/STS/latest/UsingSTS/Welcome.html) used for temporary credentials. | Taken from Amazon EC2 instance metadata. | Taken from Amazon EC2 instance metadata. |
 | `DOCKER_HOST`   | `unix:///var/run/docker.sock` | Used to create a connection to the Docker daemon; behaves similarly to this environment variable as used by the Docker client. | `unix:///var/run/docker.sock` | `npipe:////./pipe/docker_engine` |
-| `ECS_LOGLEVEL`  | &lt;crit&gt; &#124; &lt;error&gt; &#124; &lt;warn&gt; &#124; &lt;info&gt; &#124; &lt;debug&gt; | The level of detail that should be logged by the logging driver, or on Windows, the Windows Event Log. | info | info |
-| `ECS_LOGLEVEL_ON_INSTANCE`  | &lt;none&gt; &#124; &lt;crit&gt; &#124; &lt;error&gt; &#124; &lt;warn&gt; &#124; &lt;info&gt; &#124; &lt;debug&gt; | The level of detail that should be logged in the on-instance log file. | none if `ECS_LOG_DRIVER` is explicitly set to a non-empty value; info otherwise | none if `ECS_LOG_DRIVER` is explicitly set to a non-empty value; info otherwise |
+| `ECS_LOGLEVEL`  | &lt;crit&gt; &#124; &lt;error&gt; &#124; &lt;warn&gt; &#124; &lt;info&gt; &#124; &lt;debug&gt; | The level of detail to be logged. | info | info |
+| `ECS_LOGLEVEL_ON_INSTANCE`  | &lt;none&gt; &#124; &lt;crit&gt; &#124; &lt;error&gt; &#124; &lt;warn&gt; &#124; &lt;info&gt; &#124; &lt;debug&gt; | Can be used to override `ECS_LOGLEVEL` and set a level of detail that should be logged in the on-instance log file, separate from the level that is logged in the logging driver. If a logging driver is explicitly set, on-instance logs are turned off by default, but can be turned back on with this variable. | none if `ECS_LOG_DRIVER` is explicitly set to a non-empty value; otherwise the same value as `ECS_LOGLEVEL` | none if `ECS_LOG_DRIVER` is explicitly set to a non-empty value; otherwise the same value as `ECS_LOGLEVEL` |
 | `ECS_LOGFILE`   | /ecs-agent.log              | The location where logs should be written. Log level is controlled by `ECS_LOGLEVEL`. | blank | blank |
 | `ECS_CHECKPOINT`   | &lt;true &#124; false&gt; | Whether to checkpoint state to the DATADIR specified below. | true if `ECS_DATADIR` is explicitly set to a non-empty value; false otherwise | true if `ECS_DATADIR` is explicitly set to a non-empty value; false otherwise |
 | `ECS_DATADIR`      |   /data/                  | The container path where state is checkpointed for use across agent restarts. Note that on Linux, when you specify this, you will need to make sure that the Agent container has a bind mount of `$ECS_HOST_DATA_DIR/data:$ECS_DATADIR` with the corresponding values of `ECS_HOST_DATA_DIR` and `ECS_DATADIR`. | /data/ | `C:\ProgramData\Amazon\ECS\data`
 | `ECS_UPDATES_ENABLED` | &lt;true &#124; false&gt; | Whether to exit for an updater to apply updates when requested. | false | false |
 | `ECS_DISABLE_METRICS`     | &lt;true &#124; false&gt;  | Whether to disable metrics gathering for tasks. | false | true |
-| `ECS_POLL_METRICS`     | &lt;true &#124; false&gt;  | Whether to poll or stream when gathering metrics for tasks. This defaulted to `false` previous to agent version 1.40.0. WARNING: setting this to false on an instance with many containers can result in very high CPU utilization by the agent, dockerd, and containerd. | `true` | `true` |
+| `ECS_POLL_METRICS`     | &lt;true &#124; false&gt;  | Whether to poll or stream when gathering metrics for tasks. Setting this value to `true` can help reduce the CPU usage of dockerd and containerd on the ECS container instance. See also ECS_POLL_METRICS_WAIT_DURATION for setting the poll interval. | `false` | `false` |
 | `ECS_POLLING_METRICS_WAIT_DURATION` | 10s | Time to wait between polling for metrics for a task. Not used when ECS_POLL_METRICS is false. Maximum value is 20s and minimum value is 5s. If user sets above maximum it will be set to max, and if below minimum it will be set to min. | 10s | 10s |
+| `ECS_PULL_DEPENDENT_CONTAINERS_UPFRONT` | &lt;true &#124; false&gt; | Whether to pull images for containers with dependencies before the dependsOn condition has been satisfied. | false | false |
 | `ECS_RESERVED_MEMORY` | 32 | Memory, in MiB, to reserve for use by things other than containers managed by Amazon ECS. | 0 | 0 |
 | `ECS_AVAILABLE_LOGGING_DRIVERS` | `["awslogs","fluentd","gelf","json-file","journald","logentries","splunk","syslog"]` | Which logging drivers are available on the container instance. | `["json-file","none"]` | `["json-file","none"]` |
 | `ECS_DISABLE_PRIVILEGED` | `true` | Whether launching privileged containers is disabled on the container instance. | `false` | `false` |
 | `ECS_SELINUX_CAPABLE` | `true` | Whether SELinux is available on the container instance. | `false` | `false` |
 | `ECS_APPARMOR_CAPABLE` | `true` | Whether AppArmor is available on the container instance. | `false` | `false` |
-| `ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION` | 10m | Time to wait to delete containers for a stopped task. If set to less than 1 minute, the value is ignored.  | 3h | 3h |
+| `ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION` | 10m | Default time to wait to delete containers for a stopped task (see also `ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION_JITTER`). If set to less than 1 minute, the value is ignored.  | 3h | 3h |
+| `ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION_JITTER` | 1h | Jitter value for the task engine cleanup wait duration. When specified, the actual cleanup wait duration time for each task will be the duration specified in `ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION` plus a random duration between 0 and the jitter duration. | blank | blank |
 | `ECS_CONTAINER_STOP_TIMEOUT` | 10m | Instance scoped configuration for time to wait for the container to exit normally before being forcibly killed. | 30s | 30s |
 | `ECS_CONTAINER_START_TIMEOUT` | 10m | Timeout before giving up on starting a container. | 3m | 8m |
+| `ECS_CONTAINER_CREATE_TIMEOUT` | 10m | Timeout before giving up on creating a container. Minimum value is 1m. If user sets a value below minimum it will be set to min. | 4m | 4m |
 | `ECS_ENABLE_TASK_IAM_ROLE` | `true` | Whether to enable IAM Roles for Tasks on the Container Instance | `false` | `false` |
 | `ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST` | `true` | Whether to enable IAM Roles for Tasks when launched with `host` network mode on the Container Instance | `false` | `false` |
 | `ECS_DISABLE_IMAGE_CLEANUP` | `true` | Whether to disable automated image cleanup for the ECS Agent. | `false` | `false` |
@@ -159,6 +161,7 @@ additional details on each available environment variable.
 | `ECS_NUM_IMAGES_DELETE_PER_CYCLE` | 5 | The maximum number of images to delete in a single automated image cleanup cycle. If set to less than 1, the value is ignored. | 5 | 5 |
 | `ECS_IMAGE_PULL_BEHAVIOR` | &lt;default &#124; always &#124; once &#124; prefer-cached &gt; | The behavior used to customize the pull image process. If `default` is specified, the image will be pulled remotely, if the pull fails then the cached image in the instance will be used. If `always` is specified, the image will be pulled remotely, if the pull fails then the task will fail. If `once` is specified, the image will be pulled remotely if it has not been pulled before or if the image was removed by image cleanup, otherwise the cached image in the instance will be used. If `prefer-cached` is specified, the image will be pulled remotely if there is no cached image, otherwise the cached image in the instance will be used. | default | default |
 | `ECS_IMAGE_PULL_INACTIVITY_TIMEOUT` | 1m | The time to wait after docker pulls complete waiting for extraction of a container. Useful for tuning large Windows containers. | 1m | 3m |
+| `ECS_IMAGE_PULL_TIMEOUT` | 1h | The time to wait for pulling docker image. | 2h | 2h |
 | `ECS_INSTANCE_ATTRIBUTES` | `{"stack": "prod"}` | These attributes take effect only during initial registration. After the agent has joined an ECS cluster, use the PutAttributes API action to add additional attributes. For more information, see [Amazon ECS Container Agent Configuration](http://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-agent-config.html) in the Amazon ECS Developer Guide.| `{}` | `{}` |
 | `ECS_ENABLE_TASK_ENI` | `false` | Whether to enable task networking for task to be launched with its own network interface | `false` | Not applicable |
 | `ECS_ENABLE_HIGH_DENSITY_ENI` | `false` | Whether to enable high density eni feature when using task networking | `true` | Not applicable |
@@ -170,6 +173,7 @@ additional details on each available environment variable.
 | `ECS_ENABLE_TASK_CPU_MEM_LIMIT` | `true` | Whether to enable task-level cpu and memory limits | `true` | `false` |
 | `ECS_CGROUP_PATH` | `/sys/fs/cgroup` | The root cgroup path that is expected by the ECS agent. This is the path that accessible from the agent mount. | `/sys/fs/cgroup` | Not applicable |
 | `ECS_CGROUP_CPU_PERIOD` | `10ms` | CGroups CPU period for task level limits. This value should be between 8ms to 100ms | `100ms` | Not applicable |
+| `ECS_AGENT_HEALTHCHECK_HOST` | `localhost` | Override for the ecs-agent container's healthcheck localhost ip address| `localhost` | `localhost` |
 | `ECS_ENABLE_CPU_UNBOUNDED_WINDOWS_WORKAROUND` | `true` | When `true`, ECS will allow CPU unbounded(CPU=`0`) tasks to run along with CPU bounded tasks in Windows. | Not applicable | `false` |
 | `ECS_ENABLE_MEMORY_UNBOUNDED_WINDOWS_WORKAROUND` | `true` | When `true`, ECS will ignore the memory reservation parameter (soft limit) to run along with memory bounded tasks in Windows. To run a memory unbounded task, omit the memory hard limit and set any memory reservation, it will be ignored. | Not applicable | `false` |
 | `ECS_TASK_METADATA_RPS_LIMIT` | `100,150` | Comma separated integer values for steady state and burst throttle limits for task metadata endpoint | `40,60` | `40,60` |
@@ -188,7 +192,10 @@ additional details on each available environment variable.
 | `ECS_LOG_DRIVER` | `awslogs` &#124; `fluentd` &#124; `gelf` &#124; `json-file` &#124; `journald` &#124; `logentries` &#124; `syslog` &#124; `splunk` | The logging driver to be used by the Agent container. | `json-file` | Not applicable |
 | `ECS_LOG_OPTS` | `{"option":"value"}` | The options for configuring the logging driver set in `ECS_LOG_DRIVER`. | `{}` | Not applicable |
 | `ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE` | `true` | Whether to enable awslogs log driver to authenticate via credentials of task execution IAM role. Needs to be true if you want to use awslogs log driver in a task that has task execution IAM role specified. When using the ecs-init RPM with version equal or later than V1.16.0-1, this env is set to true by default. | `false` | `false` |
-
+| `ECS_FSX_WINDOWS_FILE_SERVER_SUPPORTED` | `true` | Whether FSx for Windows File Server volume type is supported on the container instance. This variable is only supported on agent versions 1.47.0 and later. | `false` | `true` |
+| `ECS_ENABLE_RUNTIME_STATS` | `true` | Determines if [pprof](https://pkg.go.dev/net/http/pprof) is enabled for the agent. If enabled, the different profiles can be accessed through the agent's introspection port (e.g. `curl http://localhost:51678/debug/pprof/heap > heap.pprof`). In addition, agent's [runtime stats](https://pkg.go.dev/runtime#ReadMemStats) are logged to `/var/log/ecs/runtime-stats.log` file. | `false` | `false` |
+| `ECS_EXCLUDE_IPV6_PORTBINDING` | `true` | Determines if agent should exclude IPv6 port binding using default network mode. If enabled, IPv6 port binding will be filtered out, and the response of DescribeTasks API call will not show tasks' IPv6 port bindings, but it is still included in Task metadata endpoint. | `true` | `true` |
+  
 ### Persistence
 
 When you run the Amazon ECS Container Agent in production, its `datadir` should be persisted between runs of the Docker
@@ -244,7 +251,7 @@ The following targets are available. Each may be run with `make <target>`.
 
 ### Standalone (on Windows)
 
-The Amazon ECS Container Agent may be built by typing `go build -o amazon-ecs-agent.exe ./agent`.
+The Amazon ECS Container Agent may be built by invoking `scripts\build_agent.ps1`
 
 ### Scripts (on Windows)
 

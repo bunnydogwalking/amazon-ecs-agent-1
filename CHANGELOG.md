@@ -1,4 +1,142 @@
 # Changelog
+## 1.57.1
+* Enhancement - Remove unused TopContainer API [#3079](https://github.com/aws/amazon-ecs-agent/pull/3079)
+* Enhancement - Add support for metrics when using awsvpc network mode on Windows [#3087](https://github.com/aws/amazon-ecs-agent/pull/3087)
+* Enhancement - Update Agent build golang version to 1.17.3 [#3097](https://github.com/aws/amazon-ecs-agent/pull/3097)
+* Enhancement - Lower task cleanup duration [#3088](https://github.com/aws/amazon-ecs-agent/pull/3088)
+* Bug - Fix memory leak in task stats collector [#3082](https://github.com/aws/amazon-ecs-agent/pull/3082) 
+
+## 1.57.0
+* Feature - Add instance health status feature. [#3071](https://github.com/aws/amazon-ecs-agent/pull/3071)
+* Enhancement - Bumps github.com/containerd/containerd from 1.3.2 to 1.4.11. [#3073](https://github.com/aws/amazon-ecs-agent/pull/3073)
+* Bug - Fixes [#2865](https://github.com/aws/amazon-ecs-agent/issues/2865) caused by a memory leak in stats collector [#3069](https://github.com/aws/amazon-ecs-agent/pull/3069)
+
+## 1.56.0
+* Feature - Enabling ECS Exec for Windows workloads running on ECS EC2 [#3053](https://github.com/aws/amazon-ecs-agent/pull/3053)
+
+## 1.55.5
+* Enhancement - Added support for integration tests on Windows Server 2004, 20H2, and 2022 [#3037](https://github.com/aws/amazon-ecs-agent/pull/3037)
+* Enhancement - Update Agent build golang version to 1.17.2 [#3057](https://github.com/aws/amazon-ecs-agent/pull/3057)
+
+## 1.55.4
+* Enhancement - GPU updates for ECS Anywhere [#3040](https://github.com/aws/amazon-ecs-agent/pull/3040)
+* Enhancement - Windows OS Family attribute advertisement [#3044](https://github.com/aws/amazon-ecs-agent/pull/3044)
+
+## 1.55.3
+* Enhancement - Upgrade Windows builds to golang version v1.17
+[#3010](https://github.com/aws/amazon-ecs-agent/pull/3010)
+* Enhancement - Introduce a new environment variable ECS_EXCLUDE_IPV6_PORTBINDING. When enabled, this filters the IPv6 port bindings for default network mode tasks in DescribeTasks API call [#3025](https://github.com/aws/amazon-ecs-agent/pull/3025)
+* Bug - Fix a issue that agent does not clean task execution credentials from credential manager when stopping a task [#2993](https://github.com/aws/amazon-ecs-agent/pull/2993) 
+
+## 1.55.2
+* Enhancement - Add runtime-stats log file to periodically log agent's runtime stats such as used memory and CPU; also add new configuration setting to enable/disable pprof [#3001](https://github.com/aws/amazon-ecs-agent/pull/3001)
+* Enhancement - Improvement of log message displayed when container instance registartion fails due to attribute validation errors [#2999](https://github.com/aws/amazon-ecs-agent/pull/2999)
+* Enhancement - Upgrade to go 1.15.9 for Linux platforms [#3002](https://github.com/aws/amazon-ecs-agent/pull/3002)
+
+## 1.55.1
+* Enhancement - Third party dependency version updates [#2982](https://github.com/aws/amazon-ecs-agent/pull/2982) [#2983](https://github.com/aws/amazon-ecs-agent/pull/2983)
+
+## 1.55.0
+* Feature - Support buffer limit option in FireLens [#2958](https://github.com/aws/amazon-ecs-agent/pull/2958)
+* Enhancement - Introduce optional jitter for task cleanup wait duration, configurable via `ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION_JITTER` environment variable. In use case where there are large number of tasks being stopped at the same time, specifying this jitter can help avoid all the task cleanup happening at the same time (the latter could add pressure to the instance and as a result affect running tasks) [#2969](https://github.com/aws/amazon-ecs-agent/pull/2969)
+
+## 1.54.1
+* Enhancement - Get container's exit code from docker event in case we receive a container die event, but fail to inspect the container. Previously the container's exit code was left as null in this case. [#2940](https://github.com/aws/amazon-ecs-agent/pull/2940)
+
+## 1.54.0
+* Feature - ECS EC2 task networking for Windows tasks [#2915](https://github.com/aws/amazon-ecs-agent/pull/2915)
+* Bug - Upgrading the amazon-vpc-cni plugins submodule to address a bug on Windows Server 2004 and Windows Server 20H2 platforms [#2930](https://github.com/aws/amazon-ecs-agent/pull/2930)
+
+## 1.53.1
+* Bug - Fix broken DataDir/Checkpoint file configuration [#2897](https://github.com/aws/amazon-ecs-agent/pull/2897)
+* Enhancement - Update Docker Library to v19.03.11 [#2905](https://github.com/aws/amazon-ecs-agent/pull/2905)
+
+## 1.53.0
+* Bug - Revert change that registered Windows ECS Instances using specific OSFamilyType [#2859](https://github.com/aws/amazon-ecs-agent/pull/2859) to address [#2881](https://github.com/aws/amazon-ecs-agent/issues/2881)
+* Bug - Fix an edge case that could incorrectly mark a task as STOPPED when Docker crashes while stopping a container [#2885](https://github.com/aws/amazon-ecs-agent/pull/2885)
+
+## 1.52.2
+* Enhancement - validate agent config file path permission on Windows [#2866](https://github.com/aws/amazon-ecs-agent/pull/2866)
+* Bug - fix potential goroutine leak when closing websocket connections [#2854](https://github.com/aws/amazon-ecs-agent/pull/2854)
+* Bug - fixes a bug where a task can be stuck in RUNNING indefinitely when a container can't be stopped due to an unresolved docker [bug](https://github.com/moby/moby/issues/41587) (see also the open [PR](https://github.com/moby/moby/pull/41588) in moby to fix the bug).
+
+## 1.52.1
+* Enhancement - Register Windows ECS Instances using specific OSFamilyType [#2859](https://github.com/aws/amazon-ecs-agent/pull/2859)
+* Enhancement - Add retries while retrieving instance-id using EC2 Instance metadata service api [#2861](https://github.com/aws/amazon-ecs-agent/pull/2861)
+
+## 1.52.0
+* Enhancement - Support for ECS EXTERNAL launch type (ECS Anywhere) [#2849](https://github.com/aws/amazon-ecs-agent/pull/2849)
+* Enhancement - Add support for ECS agent to acknowledge server heartbeat messages [#2837](https://github.com/aws/amazon-ecs-agent/pull/2837)
+
+## 1.51.0
+* Enhancement - Add configurable agent healthcheck localhost ip env var. [#2834](https://github.com/aws/amazon-ecs-agent/pull/2834)
+* Bug - Fix bug that could incorrectly clean up pause container before other containers. [#2838](https://github.com/aws/amazon-ecs-agent/pull/2838)
+* Bug - Fix task's network stats by omitting pause container in the network metrics calculation. [#2836](https://github.com/aws/amazon-ecs-agent/pull/2836)
+
+## 1.50.3
+* Enhancement - Eliminate benign docker stats "context canceled" warning messages from logs [#2813](https://github.com/aws/amazon-ecs-agent/pull/2813)
+* Bug - Fix bug where pause container was not always cleaned up [#2824](https://github.com/aws/amazon-ecs-agent/pull/2824)
+
+## 1.50.2
+* Bug - Fix potential deadlock due to seelog's string marshalling of task struct [#2811](https://github.com/aws/amazon-ecs-agent/pull/2811)
+
+## 1.50.1
+* Enhancement - Implementation of structured logs on top of seelog [#2797](https://github.com/aws/amazon-ecs-agent/pull/2797)
+* Bug - Fixed a task status deadlock and pulled container state for cached images when ECS_PULL_DEPENDENT_CONTAINERS_UPFRONT is enabled [#2800](https://github.com/aws/amazon-ecs-agent/pull/2800)
+
+## 1.50.0
+* Feature - Allows ECS customers to execute interactive commands inside containers [#2798](https://github.com/aws/amazon-ecs-agent/pull/2798)
+* Enhancement - Add error responses into TMDEv4 taskWithTags responses [#2789](https://github.com/aws/amazon-ecs-agent/pull/2789)
+* Bug - Fixed the number of cpu units the Agent will reserve for the Linux container instances [#2783](https://github.com/aws/amazon-ecs-agent/pull/2783)
+
+## 1.49.0
+* Enhancement - Allow task metadata endpoint to return metadata for task when some of the container does not have network metadata [#2747](https://github.com/aws/amazon-ecs-agent/pull/2747)
+* Enhancement - Improve error and info logging around credentials requests [#2705](https://github.com/aws/amazon-ecs-agent/pull/2705)
+* Enhancement - Introduce new environment variable ECS_CONTAINER_CREATE_TIMEOUT to make Docker create timeout configurable. Minimum value is 1m. Default value is 4m. [#2781](https://github.com/aws/amazon-ecs-agent/pull/2781)
+* Bug - Add missing error handling in getContainerStatsNotStreamed. [#2757](https://github.com/aws/amazon-ecs-agent/pull/2757)
+
+## 1.48.1
+* Bug - Fix an edge case that can cause container dependency deadlock [#2734](https://github.com/aws/amazon-ecs-agent/pull/2734)
+* Bug - Revert the change that adds client token persistence [#2708](https://github.com/aws/amazon-ecs-agent/pull/2708)
+
+## 1.48.0
+* Enhancement - Docker stop timeout buffer increased from 30s to 2m [#2697](https://github.com/aws/amazon-ecs-agent/pull/2697)
+* Enhancement - More informative ENI attachment logs [#2703](https://github.com/aws/amazon-ecs-agent/pull/2703)
+* Enhancement - Introduce new environment variable ECS_PULL_DEPENDENT_CONTAINERS_UPFRONT to pull images of dependent containers even before dependsOn condition is satisfied. This feature is turned off by default [#2731](https://github.com/aws/amazon-ecs-agent/pull/2731)
+* Enhancement - Add pulled containers metadata to Task Metadata Endpoint V4 [#2731](https://github.com/aws/amazon-ecs-agent/pull/2731)
+* Bug - Fix a bug where agent persists RCI client token to avoid being registered as different container instance ARNs [#2708](https://github.com/aws/amazon-ecs-agent/pull/2708)
+* Bug - Fix jumbled min & max for engine connection retry delays [#2721](https://github.com/aws/amazon-ecs-agent/pull/2721)
+
+## 1.47.0
+* Feature - Add support for FSxWindowsFileServerVolumeConfiguration in task definition [#2690](https://github.com/aws/amazon-ecs-agent/pull/2690)
+* Bug - Fixed Makefile to use Go1.12 for Agent windows build
+[#2688](https://github.com/aws/amazon-ecs-agent/pull/2688)
+* Bug - Initialize the logger from the agent’s main() [#2644](https://github.com/aws/amazon-ecs-agent/pull/2644)
+
+## 1.46.0
+* Enhancement -  Use Go 1.15 for Linux platforms and Go 1.12 for Windows platforms [#2653](https://github.com/aws/amazon-ecs-agent/pull/2653)
+* Bug - Currently, while polling docker stats, there is no timeout for the API call. So the call could be stuck until the container is stopped. Adding poll stats timeout [#2656](https://github.com/aws/amazon-ecs-agent/pull/2656)
+
+## 1.45.0
+* Feature - ECS metadata for AWS service lens and x-ray. We have added new fields to the TMDEv4 endpoint. Specfically, ContainerARN, LogDriver, LogOptions, and LaunchType [#2623](https://github.com/aws/amazon-ecs-agent/pull/2623)
+* Feature - add IPv6 support for task networking [#2646](https://github.com/aws/amazon-ecs-agent/pull/2646)
+* Enhancement - Propagate responses to the Amazon ECS Container Agent Log when an error occurs [#2641](https://github.com/aws/amazon-ecs-agent/pull/2641)
+* Bug - Fix HTTP response code to TMDE requests when they fail for internal reasons. Previously we returned 400 Bad Request, and will now return 500 Internal Server Error [#2643](https://github.com/aws/amazon-ecs-agent/pull/2643)
+
+## 1.44.4
+* Bug - Fix a bug where the ECS Agent did not iterate through all the dependencies of a particular container [#2615](https://github.com/aws/amazon-ecs-agent/pull/2615)
+* Bug - Fix a bug where the ECS Agent can lose track of containers if it's stopped by SIGKILL instead of SIGTERM [#2609](https://github.com/aws/amazon-ecs-agent/pull/2609)
+* Bug - Fix a bug where the a Docker API call could be made with a blank string instead of a Docker ID [#2608](https://github.com/aws/amazon-ecs-agent/pull/2608)
+* Bug - Fix a bug where the ECS Agent was expecting ECS_LOGFILE to be present as an environment variable [#2598](https://github.com/aws/amazon-ecs-agent/pull/2598)
+
+## 1.44.3
+* Bug - Revert Introspection API scope change [#2605](https://github.com/aws/amazon-ecs-agent/pull/2605)
+* Bug - Fix a bug where ECS_LOGLEVEL stopped controlling logging level on instance [#2597](https://github.com/aws/amazon-ecs-agent/pull/2597) 
+
+## 1.44.2
+* Bug - Fix Introspection API scope and bind to localhost [#2588](https://github.com/aws/amazon-ecs-agent/pull/2588)
+* Enhancement - Make image pull timeout configurable [#2565](https://github.com/aws/amazon-ecs-agent/pull/2565)
+
 
 ## 1.44.1
 * Bug - Fixes a bug where ENI is attached before Agent starts and there is a delay in acknowledgement of ENI attachment by Agent [#2581](https://github.com/aws/amazon-ecs-agent/pull/2581)

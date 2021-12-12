@@ -18,8 +18,8 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/agent/engine/image"
 
-	"github.com/boltdb/bolt"
 	"github.com/pkg/errors"
+	bolt "go.etcd.io/bbolt"
 )
 
 func (c *client) SaveImageState(img *image.ImageState) error {

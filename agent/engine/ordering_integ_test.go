@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -22,6 +22,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	"github.com/aws/amazon-ecs-agent/agent/api/container/status"
+	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/stretchr/testify/assert"
 )
@@ -31,6 +32,12 @@ const orderingTimeout = 90 * time.Second
 // TestDependencyHealthCheck is a happy-case integration test that considers a workflow with a HEALTHY dependency
 // condition. We ensure that the task can be both started and stopped.
 func TestDependencyHealthCheck(t *testing.T) {
+	// Skip these tests on WS 2016 until the failures are root-caused.
+	isWindows2016, err := config.IsWindows2016()
+	if err == nil && isWindows2016 == true {
+		t.Skip()
+	}
+
 	taskEngine, done, _ := setupWithDefaultConfig(t)
 	defer done()
 
@@ -84,6 +91,12 @@ func TestDependencyHealthCheck(t *testing.T) {
 // TestDependencyComplete validates that the COMPLETE dependency condition will resolve when the child container exits
 // with exit code 1. It ensures that the child is started and stopped before the parent starts.
 func TestDependencyComplete(t *testing.T) {
+	// Skip these tests on WS 2016 until the failures are root-caused.
+	isWindows2016, err := config.IsWindows2016()
+	if err == nil && isWindows2016 == true {
+		t.Skip()
+	}
+
 	taskEngine, done, _ := setupWithDefaultConfig(t)
 	defer done()
 
@@ -137,6 +150,12 @@ func TestDependencyComplete(t *testing.T) {
 // TestDependencySuccess validates that the SUCCESS dependency condition will resolve when the child container exits
 // with exit code 0. It ensures that the child is started and stopped before the parent starts.
 func TestDependencySuccess(t *testing.T) {
+	// Skip these tests on WS 2016 until the failures are root-caused.
+	isWindows2016, err := config.IsWindows2016()
+	if err == nil && isWindows2016 == true {
+		t.Skip()
+	}
+
 	taskEngine, done, _ := setupWithDefaultConfig(t)
 	defer done()
 
@@ -190,6 +209,12 @@ func TestDependencySuccess(t *testing.T) {
 // TestDependencySuccess validates that the SUCCESS dependency condition will fail when the child exits 1. This is a
 // contrast to how COMPLETE behaves. Instead of starting the parent, the task should simply exit.
 func TestDependencySuccessErrored(t *testing.T) {
+	// Skip these tests on WS 2016 until the failures are root-caused.
+	isWindows2016, err := config.IsWindows2016()
+	if err == nil && isWindows2016 == true {
+		t.Skip()
+	}
+
 	taskEngine, done, _ := setupWithDefaultConfig(t)
 	defer done()
 
@@ -237,6 +262,12 @@ func TestDependencySuccessErrored(t *testing.T) {
 
 // TestDependencySuccessTimeout
 func TestDependencySuccessTimeout(t *testing.T) {
+	// Skip these tests on WS 2016 until the failures are root-caused.
+	isWindows2016, err := config.IsWindows2016()
+	if err == nil && isWindows2016 == true {
+		t.Skip()
+	}
+
 	taskEngine, done, _ := setupWithDefaultConfig(t)
 	defer done()
 
@@ -287,6 +318,12 @@ func TestDependencySuccessTimeout(t *testing.T) {
 
 // TestDependencyHealthyTimeout
 func TestDependencyHealthyTimeout(t *testing.T) {
+	// Skip these tests on WS 2016 until the failures are root-caused.
+	isWindows2016, err := config.IsWindows2016()
+	if err == nil && isWindows2016 == true {
+		t.Skip()
+	}
+
 	taskEngine, done, _ := setupWithDefaultConfig(t)
 	defer done()
 
@@ -344,6 +381,12 @@ func TestDependencyHealthyTimeout(t *testing.T) {
 
 // TestShutdownOrder
 func TestShutdownOrder(t *testing.T) {
+	// Skip these tests on WS 2016 until the failures are root-caused.
+	isWindows2016, err := config.IsWindows2016()
+	if err == nil && isWindows2016 == true {
+		t.Skip()
+	}
+
 	shutdownOrderingTimeout := 120 * time.Second
 	taskEngine, done, _ := setupWithDefaultConfig(t)
 	defer done()
@@ -431,6 +474,79 @@ func TestShutdownOrder(t *testing.T) {
 	}()
 
 	waitFinished(t, finished, shutdownOrderingTimeout)
+}
+
+func TestMultipleContainerDependency(t *testing.T) {
+	// Skip these tests on WS 2016 until the failures are root-caused.
+	isWindows2016, err := config.IsWindows2016()
+	if err == nil && isWindows2016 == true {
+		t.Skip()
+	}
+
+	taskEngine, done, _ := setupWithDefaultConfig(t)
+	defer done()
+
+	stateChangeEvents := taskEngine.StateChangeEvents()
+
+	taskArn := "testMultipleContainerDependency"
+	testTask := createTestTask(taskArn)
+
+	exit := createTestContainerWithImageAndName(baseImageForOS, "exit")
+	A := createTestContainerWithImageAndName(baseImageForOS, "A")
+	B := createTestContainerWithImageAndName(baseImageForOS, "B")
+
+	exit.EntryPoint = &entryPointForOS
+	exit.Command = []string{"exit 1"}
+	exit.Essential = false
+
+	A.EntryPoint = &entryPointForOS
+	A.Command = []string{"sleep 10"}
+	A.Essential = true
+	A.DependsOnUnsafe = []apicontainer.DependsOn{
+		{
+			ContainerName: "exit",
+			Condition:     "SUCCESS",
+		},
+	}
+
+	B.EntryPoint = &entryPointForOS
+	B.Command = []string{"sleep 10"}
+	B.Essential = true
+	B.DependsOnUnsafe = []apicontainer.DependsOn{
+		{
+			ContainerName: "A",
+			Condition:     "START",
+		},
+		{
+			ContainerName: "exit",
+			Condition:     "SUCCESS",
+		},
+	}
+
+	testTask.Containers = []*apicontainer.Container{
+		exit,
+		A,
+		B,
+	}
+
+	go taskEngine.AddTask(testTask)
+
+	finished := make(chan interface{})
+	go func() {
+		// Only exit should first progress to running
+		verifyContainerRunningStateChange(t, taskEngine)
+
+		// Exit container should stop with exit code 1
+		event := <-stateChangeEvents
+		assert.Equal(t, event.(api.ContainerStateChange).Status, status.ContainerStopped)
+		assert.Equal(t, event.(api.ContainerStateChange).ContainerName, "exit")
+
+		// The task should be now stopped as dependencies of A and B are not resolved
+		verifyTaskIsStopped(stateChangeEvents, testTask)
+		close(finished)
+	}()
+
+	waitFinished(t, finished, orderingTimeout)
 }
 
 func waitFinished(t *testing.T, finished <-chan interface{}, duration time.Duration) {

@@ -1,4 +1,4 @@
-// +build windows,unit
+//go:build windows && unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -39,4 +39,14 @@ func TestParseBooleanEnvVar(t *testing.T) {
 	os.Setenv("EXAMPLE_SETTING", "False")
 	assert.False(t, parseBooleanDefaultFalseConfig("EXAMPLE_SETTING").Enabled())
 	assert.False(t, parseBooleanDefaultTrueConfig("EXAMPLE_SETTING").Enabled())
+}
+
+func TestParseFSxWindowsFileServerCapability(t *testing.T) {
+	IsWindows2016 = func() (bool, error) {
+		return false, nil
+	}
+	os.Setenv("ECS_FSX_WINDOWS_FILE_SERVER_SUPPORTED", "False")
+	defer os.Unsetenv("ECS_FSX_WINDOWS_FILE_SERVER_SUPPORTED")
+
+	assert.False(t, parseFSxWindowsFileServerCapability())
 }

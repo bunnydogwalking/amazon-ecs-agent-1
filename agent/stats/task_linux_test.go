@@ -1,4 +1,4 @@
-// +build linux,unit
+//go:build linux && unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -21,13 +21,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/amazon-ecs-agent/agent/utils/nswrapper/mocks"
-
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
 	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	mock_netlink "github.com/aws/amazon-ecs-agent/agent/eni/netlinkwrapper/mocks"
 	mock_resolver "github.com/aws/amazon-ecs-agent/agent/stats/resolver/mock"
+	mock_nswrapper "github.com/aws/amazon-ecs-agent/agent/utils/nswrapper/mocks"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -38,7 +37,7 @@ func TestTaskStatsCollection(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	resolver := mock_resolver.NewMockContainerMetadataResolver(ctrl)
-	mockNS := mocks.NewMockNS(ctrl)
+	mockNS := mock_nswrapper.NewMockNS(ctrl)
 	mockNetLink := mock_netlink.NewMockNetLink(ctrl)
 
 	containerPID := "23"
@@ -46,18 +45,20 @@ func TestTaskStatsCollection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
 	numberOfContainers := 2
 	taskStats := &StatsTask{
-		TaskMetadata: &TaskMetadata{
-			TaskArn:          taskId,
-			ContainerPID:     containerPID,
-			DeviceName:       []string{"device1", "device2"},
-			NumberContainers: numberOfContainers,
+		statsTaskCommon: &statsTaskCommon{
+			TaskMetadata: &TaskMetadata{
+				TaskArn:          taskId,
+				ContainerPID:     containerPID,
+				DeviceName:       []string{"device1", "device2"},
+				NumberContainers: numberOfContainers,
+			},
+			Ctx:                   ctx,
+			Cancel:                cancel,
+			Resolver:              resolver,
+			metricPublishInterval: time.Second,
 		},
-		Ctx:                   ctx,
-		Cancel:                cancel,
-		Resolver:              resolver,
-		netlinkinterface:      mockNetLink,
-		nswrapperinterface:    mockNS,
-		metricPublishInterval: time.Second,
+		netlinkinterface:   mockNetLink,
+		nswrapperinterface: mockNS,
 	}
 
 	testTask := &apitask.Task{
@@ -98,7 +99,7 @@ func TestTaskStatsCollectionError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	resolver := mock_resolver.NewMockContainerMetadataResolver(ctrl)
-	mockNS := mocks.NewMockNS(ctrl)
+	mockNS := mock_nswrapper.NewMockNS(ctrl)
 	mockNetLink := mock_netlink.NewMockNetLink(ctrl)
 
 	containerPID := "23"
@@ -106,18 +107,20 @@ func TestTaskStatsCollectionError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
 
 	taskStats := &StatsTask{
-		TaskMetadata: &TaskMetadata{
-			TaskArn:          taskId,
-			ContainerPID:     containerPID,
-			DeviceName:       []string{"device1", "device2"},
-			NumberContainers: 2,
+		statsTaskCommon: &statsTaskCommon{
+			TaskMetadata: &TaskMetadata{
+				TaskArn:          taskId,
+				ContainerPID:     containerPID,
+				DeviceName:       []string{"device1", "device2"},
+				NumberContainers: 2,
+			},
+			Ctx:                   ctx,
+			Cancel:                cancel,
+			Resolver:              resolver,
+			metricPublishInterval: time.Second,
 		},
-		Ctx:                   ctx,
-		Cancel:                cancel,
-		Resolver:              resolver,
-		netlinkinterface:      mockNetLink,
-		nswrapperinterface:    mockNS,
-		metricPublishInterval: time.Second,
+		netlinkinterface:   mockNetLink,
+		nswrapperinterface: mockNS,
 	}
 
 	testTask := &apitask.Task{

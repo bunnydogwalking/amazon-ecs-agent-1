@@ -1,4 +1,4 @@
-// +build unit
+//go:build unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -141,7 +141,7 @@ func TestPullImageOutputTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, "image", nil, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, "image", nil, defaultTestConfig().ImagePullTimeout)
 	assert.Error(t, metadata.Error, "Expected error for pull timeout")
 	assert.Equal(t, "DockerTimeoutError", metadata.Error.(apierrors.NamedError).ErrorName())
 }
@@ -192,7 +192,7 @@ func TestPullImageInactivityTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, "image", nil, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, "image", nil, defaultTestConfig().ImagePullTimeout)
 	assert.Error(t, metadata.Error, "Expected error for pull inactivity timeout")
 	assert.Equal(t, "CannotPullContainerError", metadata.Error.(apierrors.NamedError).ErrorName(), "Wrong error type")
 }
@@ -210,7 +210,7 @@ func TestImagePull(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, "image", nil, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, "image", nil, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 }
 
@@ -228,7 +228,7 @@ func TestImagePullTag(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, "image:mytag", nil, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, "image:mytag", nil, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 }
 
@@ -244,7 +244,7 @@ func TestImagePullDigest(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, "image@sha256:bc8813ea7b3603864987522f02a76101c17ad122e1c46d790efc0fca78ca7bfb", nil, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, "image@sha256:bc8813ea7b3603864987522f02a76101c17ad122e1c46d790efc0fca78ca7bfb", nil, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 }
 
@@ -290,7 +290,7 @@ func TestPullImageECRSuccess(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, image, authData, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, image, authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 }
 
@@ -335,7 +335,7 @@ func TestPullImageECRAuthFail(t *testing.T) {
 	ecrClientFactory.EXPECT().GetClient(authData.ECRAuthData).Return(ecrClient, nil)
 	ecrClient.EXPECT().GetAuthorizationToken(gomock.Any()).Return(nil, errors.New("test error"))
 
-	metadata := client.PullImage(ctx, image, authData, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, image, authData, defaultTestConfig().ImagePullTimeout)
 	assert.Error(t, metadata.Error, "expected pull to fail")
 }
 
@@ -355,7 +355,7 @@ func TestPullImageError(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, "image", nil, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, "image", nil, defaultTestConfig().ImagePullTimeout)
 	assert.Error(t, metadata.Error, "toomanyrequests: Rate exceeded")
 	assert.Equal(t, "CannotPullContainerError", metadata.Error.(apierrors.NamedError).ErrorName(), "Wrong error type")
 }
@@ -428,10 +428,162 @@ func TestCreateContainer(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.CreateContainer(ctx, nil, hostConfig, name, dockerclient.CreateContainerTimeout)
+	metadata := client.CreateContainer(ctx, nil, hostConfig, name, defaultTestConfig().ContainerCreateTimeout)
 	assert.NoError(t, metadata.Error)
 	assert.Equal(t, "id", metadata.DockerID)
 	assert.Nil(t, metadata.ExitCode, "Expected a created container to not have an exit code")
+}
+
+func TestCreateContainerExecTimeout(t *testing.T) {
+	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
+	defer done()
+
+	execConfig := types.ExecConfig{
+		Privileged:   false,
+		AttachStdin:  false,
+		AttachStderr: false,
+		AttachStdout: false,
+		Detach:       true,
+		DetachKeys:   "",
+		Env:          []string{},
+		Cmd:          []string{"ls"},
+	}
+
+	wait := &sync.WaitGroup{}
+	wait.Add(1)
+	mockDockerSDK.EXPECT().ContainerExecCreate(gomock.Any(), gomock.Any(), execConfig).Do(func(v, w, x interface{}) {
+		wait.Wait() // wait until timeout happens
+	}).MaxTimes(1)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	_, err := client.CreateContainerExec(ctx, "id", execConfig, xContainerShortTimeout)
+	assert.NotNil(t, err, "Expected error for create container exec")
+	assert.Equal(t, "DockerTimeoutError", err.(apierrors.NamedError).ErrorName(), "Wrong error type")
+	wait.Done()
+}
+
+func TestCreateContainerExec(t *testing.T) {
+	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
+	defer done()
+
+	name := "containerName"
+	execEnv := make([]string, 0)
+	execCmd := make([]string, 0)
+	execCmd = append(execCmd, "ls")
+	execConfig := types.ExecConfig{
+		Privileged:   false,
+		AttachStdin:  false,
+		AttachStderr: false,
+		AttachStdout: false,
+		Detach:       true,
+		DetachKeys:   "",
+		Env:          execEnv,
+		Cmd:          execCmd,
+	}
+
+	execCreateResponse := types.IDResponse{ID: "id"}
+
+	gomock.InOrder(
+		mockDockerSDK.EXPECT().ContainerExecCreate(gomock.Any(), gomock.Any(), execConfig).
+			Do(func(v, w, x interface{}) {
+				assert.True(t, reflect.DeepEqual(x, execConfig),
+					"Mismatch in create container ExecConfig, %v != %v", x, execConfig)
+			}).Return(execCreateResponse, nil),
+	)
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+
+	response, err := client.CreateContainerExec(ctx, name, execConfig, dockerclient.ContainerExecCreateTimeout)
+	assert.NoError(t, err)
+	assert.NotNil(t, response)
+	assert.Equal(t, execCreateResponse, *response)
+}
+
+func TestStartContainerExecTimeout(t *testing.T) {
+	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
+	defer done()
+
+	execStartCheck := types.ExecStartCheck{
+		Detach: true,
+		Tty:    false,
+	}
+
+	wait := &sync.WaitGroup{}
+	wait.Add(1)
+	mockDockerSDK.EXPECT().ContainerExecStart(gomock.Any(), "id", execStartCheck).Do(func(x, y, z interface{}) {
+		wait.Wait() // wait until timeout happens
+	}).MaxTimes(1).Return(nil)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	err := client.StartContainerExec(ctx, "id", types.ExecStartCheck{Detach: true, Tty: false}, xContainerShortTimeout)
+	assert.NotNil(t, err, "Expected error for start container exec")
+	assert.Equal(t, "DockerTimeoutError", err.(apierrors.NamedError).ErrorName(), "Wrong error type")
+	wait.Done()
+}
+
+func TestStartContainerExec(t *testing.T) {
+	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
+	defer done()
+
+	execStartCheck := types.ExecStartCheck{
+		Detach: true,
+		Tty:    false,
+	}
+
+	gomock.InOrder(
+		mockDockerSDK.EXPECT().ContainerExecStart(gomock.Any(), "id", execStartCheck).Return(nil),
+	)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	err := client.StartContainerExec(ctx, "id", types.ExecStartCheck{Detach: true, Tty: false}, dockerclient.ContainerExecStartTimeout)
+	assert.NoError(t, err)
+}
+
+func TestInspectContainerExecTimeout(t *testing.T) {
+	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
+	defer done()
+
+	wait := &sync.WaitGroup{}
+	wait.Add(1)
+	mockDockerSDK.EXPECT().ContainerExecInspect(gomock.Any(), "id").Do(func(x, y interface{}) {
+		wait.Wait() // wait until timeout happens
+	}).MaxTimes(1)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	_, err := client.InspectContainerExec(ctx, "id", xContainerShortTimeout)
+	assert.NotNil(t, err, "Expected error for inspect container exec")
+	assert.Equal(t, "DockerTimeoutError", err.(apierrors.NamedError).ErrorName(), "Wrong error type")
+	wait.Done()
+}
+
+func TestInspectContainerExec(t *testing.T) {
+	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
+	defer done()
+
+	inspectContainerResponse := types.ContainerExecInspect{
+		ExecID:      "id",
+		ContainerID: "cont",
+		Running:     true,
+		ExitCode:    0,
+		Pid:         25537,
+	}
+	gomock.InOrder(
+		mockDockerSDK.EXPECT().ContainerExecInspect(gomock.Any(), "id").Return(inspectContainerResponse, nil),
+	)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	resp, err := client.InspectContainerExec(ctx, "id", dockerclient.ContainerExecInspectTimeout)
+	assert.NoError(t, err)
+	assert.Equal(t, "id", resp.ExecID)
+	assert.Equal(t, "cont", resp.ContainerID)
+	assert.Equal(t, true, resp.Running)
+	assert.Equal(t, 0, resp.ExitCode)
+	assert.Equal(t, 25537, resp.Pid)
 }
 
 func TestStartContainerTimeout(t *testing.T) {
@@ -476,7 +628,11 @@ func TestStopContainerTimeout(t *testing.T) {
 	cfg.DockerStopTimeout = xContainerShortTimeout
 	mockDockerSDK, client, _, _, _, done := dockerClientSetupWithConfig(t, cfg)
 	defer done()
-	ctxTimeoutStopContainer = xContainerShortTimeout
+	reset := stopContainerTimeoutBuffer
+	stopContainerTimeoutBuffer = xContainerShortTimeout
+	defer func() {
+		stopContainerTimeoutBuffer = reset
+	}()
 
 	wait := &sync.WaitGroup{}
 	wait.Add(1)
@@ -488,7 +644,7 @@ func TestStopContainerTimeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	metadata := client.StopContainer(ctx, "id", xContainerShortTimeout)
-	assert.Error(t, metadata.Error, "Expected error for pull timeout")
+	assert.Error(t, metadata.Error, "Expected error for stop timeout")
 	assert.Equal(t, "DockerTimeoutError", metadata.Error.(apierrors.NamedError).ErrorName())
 	wait.Done()
 }
@@ -514,7 +670,7 @@ func TestStopContainer(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.StopContainer(ctx, "id", dockerclient.StopContainerTimeout)
+	metadata := client.StopContainer(ctx, "id", client.config.DockerStopTimeout)
 	assert.NoError(t, metadata.Error)
 	assert.Equal(t, "id", metadata.DockerID)
 }
@@ -806,6 +962,74 @@ func TestContainerEventsError(t *testing.T) {
 	}
 }
 
+func TestSetExitCodeFromEvent(t *testing.T) {
+	var (
+		exitCodeInt    = 42
+		exitCodeStr    = "42"
+		altExitCodeInt = 1
+	)
+
+	defaultEvent := &events.Message{
+		Status: dockerContainerDieEvent,
+		Actor: events.Actor{
+			Attributes: map[string]string{
+				dockerContainerEventExitCodeAttribute: exitCodeStr,
+			},
+		},
+	}
+
+	testCases := []struct {
+		name             string
+		event            *events.Message
+		metadata         DockerContainerMetadata
+		expectedExitCode *int
+	}{
+		{
+			name:             "exit code set from event",
+			event:            defaultEvent,
+			metadata:         DockerContainerMetadata{},
+			expectedExitCode: &exitCodeInt,
+		},
+		{
+			name:  "exit code not set from event when metadata already has it",
+			event: defaultEvent,
+			metadata: DockerContainerMetadata{
+				ExitCode: &altExitCodeInt,
+			},
+			expectedExitCode: &altExitCodeInt,
+		},
+		{
+			name: "exit code not set from event when event does not has it",
+			event: &events.Message{
+				Status: dockerContainerDieEvent,
+				Actor:  events.Actor{},
+			},
+			metadata:         DockerContainerMetadata{},
+			expectedExitCode: nil,
+		},
+		{
+			name: "exit code not set from event when event has invalid exit code",
+			event: &events.Message{
+				Status: dockerContainerDieEvent,
+				Actor: events.Actor{
+					Attributes: map[string]string{
+						dockerContainerEventExitCodeAttribute: "invalid",
+					},
+				},
+			},
+			metadata:         DockerContainerMetadata{},
+			expectedExitCode: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			setExitCodeFromEvent(tc.event, &tc.metadata)
+			assert.Equal(t, tc.expectedExitCode, tc.metadata.ExitCode)
+		})
+	}
+}
+
 func TestDockerVersion(t *testing.T) {
 	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
 	defer done()
@@ -817,6 +1041,34 @@ func TestDockerVersion(t *testing.T) {
 	str, err := client.Version(ctx, dockerclient.VersionTimeout)
 	assert.NoError(t, err)
 	assert.Equal(t, "1.6.0", str, "Got unexpected version string: "+str)
+}
+
+func TestSystemPing(t *testing.T) {
+	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
+	defer done()
+
+	mockDockerSDK.EXPECT().Ping(gomock.Any()).Return(types.Ping{APIVersion: "test_docker_api"}, nil)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	pingResponse := client.SystemPing(ctx, dockerclient.InfoTimeout)
+
+	assert.NoError(t, pingResponse.Error)
+	assert.Equal(t, "test_docker_api", pingResponse.Response.APIVersion)
+}
+
+func TestSystemPingError(t *testing.T) {
+	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
+	defer done()
+
+	mockDockerSDK.EXPECT().Ping(gomock.Any()).Return(types.Ping{}, errors.New("test error"))
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	pingResponse := client.SystemPing(ctx, dockerclient.InfoTimeout)
+
+	assert.Error(t, pingResponse.Error)
+	assert.Nil(t, pingResponse.Response)
 }
 
 func TestDockerInfo(t *testing.T) {
@@ -1034,6 +1286,18 @@ func TestUnavailableVersionError(t *testing.T) {
 	}
 }
 
+func waitForStatsChanClose(statsChan <-chan *types.StatsJSON) (closed bool) {
+	i := 0
+	for range statsChan {
+		if i == 10 {
+			return false
+		}
+		i++
+		time.Sleep(time.Millisecond * 10)
+	}
+	return true
+}
+
 func TestStatsNormalExit(t *testing.T) {
 	mockDockerSDK, client, _, _, _, done := dockerClientSetup(t)
 	defer done()
@@ -1051,6 +1315,12 @@ func TestStatsNormalExit(t *testing.T) {
 
 	assert.Equal(t, uint64(50), newStat.MemoryStats.Usage)
 	assert.Equal(t, uint64(100), newStat.CPUStats.SystemUsage)
+
+	// stop container stats
+	cancel()
+	// verify stats chan was closed to avoid goroutine leaks
+	closed := waitForStatsChanClose(stats)
+	assert.True(t, closed, "stats channel was not properly closed")
 }
 
 func TestStatsErrorReading(t *testing.T) {
@@ -1064,9 +1334,12 @@ func TestStatsErrorReading(t *testing.T) {
 	}, errors.New("test error"))
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	_, errC := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
+	statsC, errC := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
 
 	assert.Error(t, <-errC)
+	// verify stats chan was closed to avoid goroutine leaks
+	closed := waitForStatsChanClose(statsC)
+	assert.True(t, closed, "stats channel was not properly closed")
 }
 
 func TestStatsErrorDecoding(t *testing.T) {
@@ -1080,8 +1353,11 @@ func TestStatsErrorDecoding(t *testing.T) {
 	}, nil)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	_, errC := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
+	statsC, errC := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
 	assert.Error(t, <-errC)
+	// verify stats chan was closed to avoid goroutine leaks
+	closed := waitForStatsChanClose(statsC)
+	assert.True(t, closed, "stats channel was not properly closed")
 }
 
 func TestStatsClientError(t *testing.T) {
@@ -1097,9 +1373,9 @@ func TestStatsClientError(t *testing.T) {
 	statsC, errC := client.Stats(ctx, "foo", dockerclient.StatsInactivityTimeout)
 	// should get an error from the channel
 	err := <-errC
-	// stats channel should be closed (ok=false)
-	_, ok := <-statsC
-	assert.False(t, ok)
+	// stats channel should be closed
+	closed := waitForStatsChanClose(statsC)
+	assert.True(t, closed, "stats channel was not properly closed")
 	assert.Error(t, err)
 }
 
@@ -1161,6 +1437,35 @@ func TestStatsInactivityTimeout(t *testing.T) {
 	defer cancel()
 	_, errC := client.Stats(ctx, "foo", shortInactivityTimeout)
 	assert.Error(t, <-errC)
+}
+
+func TestPollStatsTimeout(t *testing.T) {
+	shortTimeout := 1 * time.Millisecond
+	mockDockerSDK, _, _, _, _, done := dockerClientSetup(t)
+	defer done()
+	wait := &sync.WaitGroup{}
+	wait.Add(1)
+	mockDockerSDK.EXPECT().ContainerStats(gomock.Any(), gomock.Any(), false).Do(func(x, y, z interface{}) {
+		wait.Wait()
+	}).MaxTimes(1).Return(types.ContainerStats{Body: mockStream{}}, nil)
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	_, err := getContainerStatsNotStreamed(mockDockerSDK, ctx, "", shortTimeout)
+	assert.Error(t, err)
+	wait.Done()
+}
+
+func TestPollStatsError(t *testing.T) {
+	shortTimeout := 1 * time.Millisecond
+	mockDockerSDK, _, _, _, _, done := dockerClientSetup(t)
+	defer done()
+	mockDockerSDK.EXPECT().ContainerStats(gomock.Any(), gomock.Any(), false).MaxTimes(1).Return(types.ContainerStats{
+		Body: nil},
+		errors.New("Container stats error"))
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	_, err := getContainerStatsNotStreamed(mockDockerSDK, ctx, "foo", shortTimeout)
+	assert.Error(t, err)
 }
 
 func TestStatsInactivityTimeoutNoHit(t *testing.T) {
@@ -1286,19 +1591,19 @@ func TestECRAuthCacheWithoutExecutionRole(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, image, authData, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, image, authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 
 	// Pull from the same registry shouldn't expect ecr client call
-	metadata = client.PullImage(ctx, image+"2", authData, dockerclient.PullImageTimeout)
+	metadata = client.PullImage(ctx, image+"2", authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 
 	// Pull from the same registry shouldn't expect ecr client call
-	metadata = client.PullImage(ctx, image+"3", authData, dockerclient.PullImageTimeout)
+	metadata = client.PullImage(ctx, image+"3", authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 
 	// Pull from the same registry shouldn't expect ecr client call
-	metadata = client.PullImage(ctx, image+"4", authData, dockerclient.PullImageTimeout)
+	metadata = client.PullImage(ctx, image+"4", authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 }
 
@@ -1342,7 +1647,7 @@ func TestECRAuthCacheForDifferentRegistry(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, image, authData, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, image, authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 
 	// Pull from the different registry should expect ECR client call
@@ -1354,7 +1659,7 @@ func TestECRAuthCacheForDifferentRegistry(t *testing.T) {
 			AuthorizationToken: aws.String(base64.StdEncoding.EncodeToString([]byte(username + ":" + password))),
 			ExpiresAt:          aws.Time(time.Now().Add(10 * time.Hour)),
 		}, nil).Times(1)
-	metadata = client.PullImage(ctx, image, authData, dockerclient.PullImageTimeout)
+	metadata = client.PullImage(ctx, image, authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 }
 
@@ -1401,15 +1706,15 @@ func TestECRAuthCacheWithSameExecutionRole(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, image, authData, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, image, authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 
 	// Pull from the same registry shouldn't expect ecr client call
-	metadata = client.PullImage(ctx, image+"2", authData, dockerclient.PullImageTimeout)
+	metadata = client.PullImage(ctx, image+"2", authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 
 	// Pull from the same registry shouldn't expect ecr client call
-	metadata = client.PullImage(ctx, image+"3", authData, dockerclient.PullImageTimeout)
+	metadata = client.PullImage(ctx, image+"3", authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 }
 
@@ -1456,7 +1761,7 @@ func TestECRAuthCacheWithDifferentExecutionRole(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	metadata := client.PullImage(ctx, image, authData, dockerclient.PullImageTimeout)
+	metadata := client.PullImage(ctx, image, authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 
 	// Pull from the same registry but with different role
@@ -1470,7 +1775,7 @@ func TestECRAuthCacheWithDifferentExecutionRole(t *testing.T) {
 			AuthorizationToken: aws.String(base64.StdEncoding.EncodeToString([]byte(username + ":" + password))),
 			ExpiresAt:          aws.Time(time.Now().Add(10 * time.Hour)),
 		}, nil).Times(1)
-	metadata = client.PullImage(ctx, image, authData, dockerclient.PullImageTimeout)
+	metadata = client.PullImage(ctx, image, authData, defaultTestConfig().ImagePullTimeout)
 	assert.NoError(t, metadata.Error, "Expected pull to succeed")
 }
 

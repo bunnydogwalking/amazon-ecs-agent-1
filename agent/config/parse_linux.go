@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -15,6 +15,24 @@
 
 package config
 
+import (
+	"errors"
+	"strings"
+)
+
 func parseGMSACapability() bool {
 	return false
+}
+
+func parseFSxWindowsFileServerCapability() bool {
+	return false
+}
+
+var IsWindows2016 = func() (bool, error) {
+	return false, errors.New("unsupported platform")
+}
+
+// GetOSFamily returns "LINUX" as operating system family for linux based ecs instances.
+func GetOSFamily() string {
+	return strings.ToUpper(OSType)
 }

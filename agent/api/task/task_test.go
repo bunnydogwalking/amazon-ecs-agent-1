@@ -1,4 +1,4 @@
-// +build unit
+//go:build unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
-	"github.com/aws/amazon-ecs-agent/agent/api/appmesh"
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
 	apieni "github.com/aws/amazon-ecs-agent/agent/api/eni"
@@ -38,7 +37,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
-	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	mock_ssm_factory "github.com/aws/amazon-ecs-agent/agent/ssm/factory/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/asmauth"
@@ -323,10 +321,17 @@ func TestDockerHostConfigPauseContainer(t *testing.T) {
 	testTask.ENIs[0].IPV4Addresses = []*apieni.ENIIPV4Address{ipaddr}
 	testTask.ENIs[0].PrivateDNSName = "eni.ip.region.compute.internal"
 
+	testTask.ENIs[0].IPV6Addresses = []*apieni.ENIIPV6Address{{Address: ipv6}}
 	cfg, err = testTask.DockerHostConfig(pauseContainer, dockerMap(testTask), defaultDockerClientAPIVersion,
 		&config.Config{})
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"eni.ip.region.compute.internal:10.0.1.1"}, cfg.ExtraHosts)
+
+	// Verify ipv6 setting is enabled.
+	if runtime.GOOS == "linux" {
+		require.NotNil(t, cfg.Sysctls)
+		assert.Equal(t, sysctlValueOff, cfg.Sysctls[disableIPv6SysctlKey])
+	}
 
 	// Verify eni Hostname is added to DockerConfig for pause container
 	dockerconfig, dockerConfigErr := testTask.DockerConfig(pauseContainer, defaultDockerClientAPIVersion)
@@ -563,7 +568,8 @@ func TestGetDockerResources(t *testing.T) {
 			},
 		},
 	}
-	resources := testTask.getDockerResources(testTask.Containers[0])
+	cfg := &config.Config{}
+	resources := testTask.getDockerResources(testTask.Containers[0], cfg)
 	assert.Equal(t, int64(10), resources.CPUShares, "Wrong number of CPUShares")
 	assert.Equal(t, int64(268435456), resources.Memory, "Wrong amount of memory")
 }
@@ -581,7 +587,8 @@ func TestGetDockerResourcesCPUTooLow(t *testing.T) {
 			},
 		},
 	}
-	resources := testTask.getDockerResources(testTask.Containers[0])
+	cfg := &config.Config{}
+	resources := testTask.getDockerResources(testTask.Containers[0], cfg)
 	assert.Equal(t, int64(268435456), resources.Memory, "Wrong amount of memory")
 
 	// Minimum requirement of 2 CPU Shares
@@ -603,7 +610,8 @@ func TestGetDockerResourcesMemoryTooLow(t *testing.T) {
 			},
 		},
 	}
-	resources := testTask.getDockerResources(testTask.Containers[0])
+	cfg := &config.Config{}
+	resources := testTask.getDockerResources(testTask.Containers[0], cfg)
 	assert.Equal(t, int64(10), resources.CPUShares, "Wrong number of CPUShares")
 	assert.Equal(t, int64(apicontainer.DockerContainerMinimumMemoryInBytes), resources.Memory,
 		"Wrong amount of memory")
@@ -621,9 +629,55 @@ func TestGetDockerResourcesUnspecifiedMemory(t *testing.T) {
 			},
 		},
 	}
-	resources := testTask.getDockerResources(testTask.Containers[0])
+	cfg := &config.Config{}
+	resources := testTask.getDockerResources(testTask.Containers[0], cfg)
 	assert.Equal(t, int64(10), resources.CPUShares, "Wrong number of CPUShares")
 	assert.Equal(t, int64(0), resources.Memory, "Wrong amount of memory")
+}
+
+func TestGetDockerResourcesExternalGPUInstance(t *testing.T) {
+	container := &apicontainer.Container{
+		Name:   "c1",
+		CPU:    uint(10),
+		Memory: uint(256),
+		GPUIDs: []string{"gpu1"},
+	}
+	testTask := &Task{
+		Arn:        "arn:aws:ecs:us-east-1:012345678910:task/c09f0188-7f87-4b0f-bfc3-16296622b6fe",
+		Family:     "myFamily",
+		Version:    "1",
+		Containers: []*apicontainer.Container{container},
+	}
+	cfg := &config.Config{
+		GPUSupportEnabled: true,
+	}
+	cfg.External.Value = config.ExplicitlyEnabled
+	resources := testTask.getDockerResources(testTask.Containers[0], cfg)
+	assert.Equal(t, int64(10), resources.CPUShares, "Wrong number of CPUShares")
+	assert.Equal(t, int64(268435456), resources.Memory, "Wrong amount of memory")
+	assert.Equal(t, resources.DeviceRequests[0].DeviceIDs, container.GPUIDs, "Wrong GPU IDs assigned")
+}
+
+func TestGetDockerResourcesInternalGPUInstance(t *testing.T) {
+	container := &apicontainer.Container{
+		Name:   "c1",
+		CPU:    uint(10),
+		Memory: uint(256),
+		GPUIDs: []string{"gpu1"},
+	}
+	testTask := &Task{
+		Arn:        "arn:aws:ecs:us-east-1:012345678910:task/c09f0188-7f87-4b0f-bfc3-16296622b6fe",
+		Family:     "myFamily",
+		Version:    "1",
+		Containers: []*apicontainer.Container{container},
+	}
+	cfg := &config.Config{
+		GPUSupportEnabled: true,
+	}
+	resources := testTask.getDockerResources(testTask.Containers[0], cfg)
+	assert.Equal(t, int64(10), resources.CPUShares, "Wrong number of CPUShares")
+	assert.Equal(t, int64(268435456), resources.Memory, "Wrong amount of memory")
+	assert.Equal(t, int64(len(resources.DeviceRequests)), int64(0), "GPU IDs to be handled by env var for internal instance")
 }
 
 func TestPostUnmarshalTaskWithDockerVolumes(t *testing.T) {
@@ -3274,114 +3328,6 @@ func TestGetContainerIndex(t *testing.T) {
 	assert.Equal(t, -1, task.GetContainerIndex("p"))
 }
 
-func TestBuildCNIConfigRegularENIWithAppMesh(t *testing.T) {
-	for _, blockIMDS := range []bool{true, false} {
-		t.Run(fmt.Sprintf("When BlockInstanceMetadata is %t", blockIMDS), func(t *testing.T) {
-			testTask := &Task{}
-			testTask.AddTaskENI(&apieni.ENI{
-				ID: "TestBuildCNIConfigRegularENI",
-				IPV4Addresses: []*apieni.ENIIPV4Address{
-					{
-						Primary: true,
-						Address: ipv4,
-					},
-				},
-				MacAddress: mac,
-				IPV6Addresses: []*apieni.ENIIPV6Address{
-					{
-						Address: ipv6,
-					},
-				},
-			})
-			testTask.SetAppMesh(&appmesh.AppMesh{
-				IgnoredUID:       ignoredUID,
-				ProxyIngressPort: proxyIngressPort,
-				ProxyEgressPort:  proxyEgressPort,
-				AppPorts: []string{
-					appPort,
-				},
-				EgressIgnoredIPs: []string{
-					egressIgnoredIP,
-				},
-			})
-			cniConfig, err := testTask.BuildCNIConfig(true, &ecscni.Config{
-				BlockInstanceMetadata: blockIMDS,
-			})
-			assert.NoError(t, err)
-			// We expect 3 NetworkConfig objects in the cni Config wrapper object:
-			// ENI, Bridge and Appmesh
-			require.Len(t, cniConfig.NetworkConfigs, 3)
-			// The first one should be for the ENI.
-			var eniConfig ecscni.ENIConfig
-			err = json.Unmarshal(cniConfig.NetworkConfigs[0].CNINetworkConfig.Bytes, &eniConfig)
-			require.NoError(t, err)
-			assert.Equal(t, mac, eniConfig.MACAddress, eniConfig)
-			assert.Equal(t, ipv4, eniConfig.IPV4Address)
-			assert.Equal(t, blockIMDS, eniConfig.BlockInstanceMetadata)
-			// The second one should be for the Bridge.
-			var bridgeConfig ecscni.BridgeConfig
-			err = json.Unmarshal(cniConfig.NetworkConfigs[1].CNINetworkConfig.Bytes, &bridgeConfig)
-			require.NoError(t, err)
-			assert.Equal(t, "ecs-bridge", bridgeConfig.BridgeName)
-			// The third one should be for Appmesh.
-			var appMeshConfig ecscni.AppMeshConfig
-			err = json.Unmarshal(cniConfig.NetworkConfigs[2].CNINetworkConfig.Bytes, &appMeshConfig)
-			require.NoError(t, err)
-			assert.Equal(t, ignoredUID, appMeshConfig.IgnoredUID)
-			assert.Equal(t, proxyIngressPort, appMeshConfig.ProxyIngressPort)
-			assert.Equal(t, proxyEgressPort, appMeshConfig.ProxyEgressPort)
-			assert.Equal(t, appPort, appMeshConfig.AppPorts[0])
-			assert.Equal(t, egressIgnoredIP, appMeshConfig.EgressIgnoredIPs[0])
-		})
-	}
-}
-
-func TestBuildCNIConfigTrunkBranchENI(t *testing.T) {
-	for _, blockIMDS := range []bool{true, false} {
-		t.Run(fmt.Sprintf("When BlockInstanceMetadata is %t", blockIMDS), func(t *testing.T) {
-			testTask := &Task{}
-			testTask.AddTaskENI(&apieni.ENI{
-				ID:                           "TestBuildCNIConfigTrunkBranchENI",
-				MacAddress:                   mac,
-				InterfaceAssociationProtocol: apieni.VLANInterfaceAssociationProtocol,
-				InterfaceVlanProperties: &apieni.InterfaceVlanProperties{
-					VlanID:                   "1234",
-					TrunkInterfaceMacAddress: "macTrunk",
-				},
-				SubnetGatewayIPV4Address: "10.0.1.0/24",
-				IPV4Addresses: []*apieni.ENIIPV4Address{
-					{
-						Primary: true,
-						Address: ipv4,
-					},
-				},
-			})
-
-			cniConfig, err := testTask.BuildCNIConfig(true, &ecscni.Config{
-				BlockInstanceMetadata: blockIMDS,
-			})
-			assert.NoError(t, err)
-			// We expect 2 NetworkConfig objects in the cni Config wrapper object:
-			// Branch ENI and Bridge.
-			require.Len(t, cniConfig.NetworkConfigs, 2)
-			// The first one should be for the ENI.
-			var eniConfig ecscni.BranchENIConfig
-			err = json.Unmarshal(cniConfig.NetworkConfigs[0].CNINetworkConfig.Bytes, &eniConfig)
-			require.NoError(t, err)
-			assert.Equal(t, mac, eniConfig.BranchMACAddress, eniConfig)
-			assert.Equal(t, "macTrunk", eniConfig.TrunkMACAddress, eniConfig)
-			assert.Equal(t, "1234", eniConfig.BranchVlanID)
-			assert.Equal(t, ipv4+"/24", eniConfig.BranchIPAddress)
-			assert.Equal(t, blockIMDS, eniConfig.BlockInstanceMetadata)
-			// The second one should be for the Bridge.
-			var bridgeConfig ecscni.BridgeConfig
-			err = json.Unmarshal(cniConfig.NetworkConfigs[1].CNINetworkConfig.Bytes, &bridgeConfig)
-			require.NoError(t, err)
-			assert.Equal(t, "ecs-bridge", bridgeConfig.BridgeName)
-		})
-	}
-}
-
 func TestPostUnmarshalTaskEnvfiles(t *testing.T) {
 	envfile := apicontainer.EnvironmentFile{
 		Value: "s3://bucket/envfile",
@@ -3508,4 +3454,52 @@ func TestPopulateTaskARN(t *testing.T) {
 	}
 	task.populateTaskARN()
 	assert.Equal(t, task.Arn, task.Containers[0].GetTaskARN())
+}
+
+func TestShouldEnableIPv6(t *testing.T) {
+	task := &Task{
+		ENIs: []*apieni.ENI{getTestENI()},
+	}
+	assert.True(t, task.shouldEnableIPv6())
+	task.ENIs[0].IPV6Addresses = nil
+	assert.False(t, task.shouldEnableIPv6())
+}
+
+func getTestENI() *apieni.ENI {
+	return &apieni.ENI{
+		ID: "test",
+		IPV4Addresses: []*apieni.ENIIPV4Address{
+			{
+				Primary: true,
+				Address: ipv4,
+			},
+		},
+		MacAddress: mac,
+		IPV6Addresses: []*apieni.ENIIPV6Address{
+			{
+				Address: ipv6,
+			},
+		},
+		SubnetGatewayIPV4Address: ipv4Gateway + ipv4Block,
+	}
+}
+
+func TestPostUnmarshalTaskWithOptions(t *testing.T) {
+	taskFromACS := ecsacs.Task{
+		Arn:           strptr("myArn"),
+		DesiredStatus: strptr("RUNNING"),
+		Family:        strptr("myFamily"),
+		Version:       strptr("1"),
+	}
+	seqNum := int64(42)
+	task, err := TaskFromACS(&taskFromACS, &ecsacs.PayloadMessage{SeqNum: &seqNum})
+	assert.Nil(t, err, "Should be able to handle acs task")
+	numCalls := 0
+	opt := func(optTask *Task) error {
+		assert.Equal(t, task, optTask)
+		numCalls++
+		return nil
+	}
+	task.PostUnmarshalTask(&config.Config{}, nil, nil, nil, nil, opt, opt)
+	assert.Equal(t, 2, numCalls)
 }

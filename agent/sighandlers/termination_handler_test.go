@@ -1,4 +1,4 @@
-// +build unit
+//go:build unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -45,7 +45,7 @@ func TestFinalSave(t *testing.T) {
 
 	state := dockerstate.NewTaskEngineState()
 	taskEngine := engine.NewTaskEngine(&config.Config{}, nil, nil,
-		nil, nil, state, nil, nil)
+		nil, nil, state, nil, nil, nil)
 
 	task := &apitask.Task{
 		Arn:     taskARN,

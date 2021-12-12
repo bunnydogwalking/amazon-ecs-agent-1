@@ -1,4 +1,4 @@
-// +build unit
+//go:build unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -16,13 +16,14 @@
 package task
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
 
 func taskN(n int) *Task {
 	return &Task{
-		Arn: string(n),
+		Arn: fmt.Sprint(n),
 	}
 }
 

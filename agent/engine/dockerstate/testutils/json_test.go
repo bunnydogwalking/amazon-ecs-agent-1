@@ -1,4 +1,4 @@
-// +build unit
+//go:build unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -32,7 +32,7 @@ import (
 func createTestContainer(num int) *apicontainer.Container {
 	return &apicontainer.Container{
 		Name:                "busybox-" + strconv.Itoa(num),
-		Image:               "busybox:latest",
+		Image:               "busybox:1.32.0",
 		Essential:           true,
 		DesiredStatusUnsafe: apicontainerstatus.ContainerRunning,
 	}

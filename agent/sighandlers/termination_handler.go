@@ -32,8 +32,8 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/sighandlers/exitcodes"
 
-	"github.com/boltdb/bolt"
 	"github.com/cihub/seelog"
+	bolt "go.etcd.io/bbolt"
 )
 
 const (

@@ -1,0 +1,34 @@
+name: Windows
+
+on: [pull_request]
+
+jobs:
+  windows-unit-tests:
+    name: Windows unit tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          path: src/github.com/aws/amazon-ecs-agent
+      - name: get GO_VERSION
+        run:  |
+          cd "$Env:GITHUB_WORKSPACE"
+          cd "src/github.com/aws/amazon-ecs-agent"
+          echo "GO_VERSION_WINDOWS=$(type GO_VERSION_WINDOWS)" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+      - uses: actions/setup-go@v2
+        with:
+          go-version: ${{ env.GO_VERSION_WINDOWS }}
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+          path: src/github.com/aws/amazon-ecs-agent
+      - name: run tests
+        working-directory:
+        run: |
+          $Env:GOPATH = "$Env:GITHUB_WORKSPACE"
+          cd "$Env:GITHUB_WORKSPACE"
+          cd "src/github.com/aws/amazon-ecs-agent/agent"
+          gcc --version
+          $env:ZZZ_SKIP_WINDOWS_SERVER_VERSION_CHECK_NOT_SUPPORTED_IN_PRODUCTION = 'true'
+          $packages=go list .\... | Where-Object {$_ -NotMatch 'vendor'}
+          go test -v -tags unit -timeout=40s $packages

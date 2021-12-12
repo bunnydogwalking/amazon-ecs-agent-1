@@ -1,4 +1,4 @@
-// +build windows,unit
+//go:build windows && unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -47,8 +47,9 @@ func (m *mockAgent) start() int {
 func (m *mockAgent) setTerminationHandler(handler sighandlers.TerminationHandler) {
 	m.terminationHandler = handler
 }
-func (m *mockAgent) printECSAttributes() int  { return 0 }
-func (m *mockAgent) startWindowsService() int { return 0 }
+func (m *mockAgent) printECSAttributes() int   { return 0 }
+func (m *mockAgent) startWindowsService() int  { return 0 }
+func (m *mockAgent) getConfig() *config.Config { return &config.Config{} }
 
 func TestHandler_RunAgent_StartExitImmediately(t *testing.T) {
 	// register some mocks, but nothing should get called on any of them
@@ -287,7 +288,7 @@ func TestHandler_Execute_AgentStops(t *testing.T) {
 
 func TestDoStartTaskLimitsFail(t *testing.T) {
 	ctrl, credentialsManager, state, imageManager, client,
-		dockerClient, stateManagerFactory, saveableOptionFactory := setup(t)
+		dockerClient, stateManagerFactory, saveableOptionFactory, execCmdMgr := setup(t)
 	defer ctrl.Finish()
 
 	cfg := getTestConfig()
@@ -308,6 +309,6 @@ func TestDoStartTaskLimitsFail(t *testing.T) {
 	dockerClient.EXPECT().SupportedVersions().Return(apiVersions)
 
 	exitCode := agent.doStart(eventstream.NewEventStream("events", ctx),
-		credentialsManager, state, imageManager, client)
+		credentialsManager, state, imageManager, client, execCmdMgr)
 	assert.Equal(t, exitcodes.ExitTerminal, exitCode)
 }
