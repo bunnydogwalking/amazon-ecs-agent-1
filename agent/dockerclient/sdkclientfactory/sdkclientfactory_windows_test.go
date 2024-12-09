@@ -1,4 +1,5 @@
 //go:build unit && windows
+// +build unit,windows
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -35,7 +36,7 @@ func TestGetClientMinimumVersion(t *testing.T) {
 
 	newVersionedClient = func(endpoint, version string) (sdkclient.Client, error) {
 		mockClient := mock_sdkclient.NewMockClient(ctrl)
-		if version == string(minDockerAPIVersion) {
+		if version == string(dockerclient.MinDockerAPIVersion) {
 			mockClient = expectedClient
 		}
 		mockClient.EXPECT().ServerVersion(gomock.Any()).Return(docker.Version{}, nil).AnyTimes()
@@ -43,8 +44,8 @@ func TestGetClientMinimumVersion(t *testing.T) {
 		return mockClient, nil
 	}
 
-	// Ensure a call to GetClient with a version below the minDockerAPIVersion
-	// is replaced by the minDockerAPIVersion
+	// Ensure a call to GetClient with a version below the dockerclient.MinDockerAPIVersion
+	// is replaced by the dockerclient.MinDockerAPIVersion
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	factory := NewFactory(ctx, expectedEndpoint)
@@ -63,7 +64,7 @@ func TestFindClientAPIVersion(t *testing.T) {
 
 	for _, version := range getAgentSupportedDockerVersions() {
 		if isWindowsReplaceableVersion(version) {
-			version = minDockerAPIVersion
+			version = dockerclient.MinDockerAPIVersion
 		}
 		mockClient.EXPECT().ClientVersion().Return(string(version))
 		assert.Equal(t, version, factory.FindClientAPIVersion(mockClient))

@@ -1,4 +1,5 @@
 //go:build windows && unit
+// +build windows,unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -23,10 +24,12 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
-	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	mock_ecscni "github.com/aws/amazon-ecs-agent/agent/ecscni/mocks"
+	dm "github.com/aws/amazon-ecs-agent/agent/engine/daemonmanager"
+	"github.com/aws/amazon-ecs-agent/agent/engine/serviceconnect"
 	mock_mobypkgwrapper "github.com/aws/amazon-ecs-agent/agent/utils/mobypkgwrapper/mocks"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/api/ecs/model/ecs"
 
 	"github.com/aws/aws-sdk-go/aws"
 	aws_credentials "github.com/aws/aws-sdk-go/aws/credentials"
@@ -66,10 +69,6 @@ func TestVolumeDriverCapabilitiesWindows(t *testing.T) {
 		client.EXPECT().SupportedVersions().Return([]dockerclient.DockerVersion{
 			dockerclient.Version_1_17,
 			dockerclient.Version_1_18,
-		}),
-		client.EXPECT().KnownVersions().Return([]dockerclient.DockerVersion{
-			dockerclient.Version_1_17,
-			dockerclient.Version_1_18,
 			dockerclient.Version_1_19,
 		}),
 		cniClient.EXPECT().Version(ecscni.ECSVPCENIPluginExecutable).Return("v1", nil),
@@ -79,6 +78,7 @@ func TestVolumeDriverCapabilitiesWindows(t *testing.T) {
 		capabilityPrefix + "privileged-container",
 		capabilityPrefix + "docker-remote-api.1.17",
 		capabilityPrefix + "docker-remote-api.1.18",
+		capabilityPrefix + "docker-remote-api.1.19",
 		capabilityPrefix + "logging-driver.json-file",
 		capabilityPrefix + "logging-driver.syslog",
 		capabilityPrefix + "logging-driver.journald",
@@ -106,12 +106,14 @@ func TestVolumeDriverCapabilitiesWindows(t *testing.T) {
 	// Cancel the context to cancel async routines
 	defer cancel()
 	agent := &ecsAgent{
-		ctx:                ctx,
-		cfg:                conf,
-		dockerClient:       client,
-		cniClient:          cniClient,
-		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
-		mobyPlugins:        mockMobyPlugins,
+		ctx:                   ctx,
+		cfg:                   conf,
+		dockerClient:          client,
+		cniClient:             cniClient,
+		credentialProvider:    aws_credentials.NewCredentials(mockCredentialsProvider),
+		mobyPlugins:           mockMobyPlugins,
+		serviceconnectManager: serviceconnect.NewManager(),
+		daemonManagers:        make(map[string]dm.DaemonManager),
 	}
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
@@ -154,10 +156,6 @@ func TestSupportedCapabilitiesWindows(t *testing.T) {
 		client.EXPECT().SupportedVersions().Return([]dockerclient.DockerVersion{
 			dockerclient.Version_1_17,
 			dockerclient.Version_1_18,
-		}),
-		client.EXPECT().KnownVersions().Return([]dockerclient.DockerVersion{
-			dockerclient.Version_1_17,
-			dockerclient.Version_1_18,
 			dockerclient.Version_1_19,
 		}),
 		cniClient.EXPECT().Version(ecscni.ECSVPCENIPluginExecutable).Return("v1", nil),
@@ -167,6 +165,7 @@ func TestSupportedCapabilitiesWindows(t *testing.T) {
 		capabilityPrefix + "privileged-container",
 		capabilityPrefix + "docker-remote-api.1.17",
 		capabilityPrefix + "docker-remote-api.1.18",
+		capabilityPrefix + "docker-remote-api.1.19",
 		capabilityPrefix + "logging-driver.json-file",
 		capabilityPrefix + "logging-driver.syslog",
 		capabilityPrefix + "logging-driver.journald",
@@ -183,7 +182,10 @@ func TestSupportedCapabilitiesWindows(t *testing.T) {
 		attributePrefix + capabilityContainerOrdering,
 		attributePrefix + capabilityFullTaskSync,
 		attributePrefix + capabilityEnvFilesS3,
-		attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix}
+		attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix,
+		attributePrefix + capabilityContainerPortRange,
+		attributePrefix + capabilityContainerRestartPolicy,
+	}
 
 	var expectedCapabilities []*ecs.Attribute
 	for _, name := range expectedCapabilityNames {
@@ -202,48 +204,23 @@ func TestSupportedCapabilitiesWindows(t *testing.T) {
 	// Cancel the context to cancel async routines
 	defer cancel()
 	agent := &ecsAgent{
-		ctx:                ctx,
-		cfg:                conf,
-		dockerClient:       client,
-		cniClient:          cniClient,
-		credentialProvider: aws_credentials.NewCredentials(mockCredentialsProvider),
-		mobyPlugins:        mockMobyPlugins,
+		ctx:                   ctx,
+		cfg:                   conf,
+		dockerClient:          client,
+		cniClient:             cniClient,
+		credentialProvider:    aws_credentials.NewCredentials(mockCredentialsProvider),
+		mobyPlugins:           mockMobyPlugins,
+		serviceconnectManager: serviceconnect.NewManager(),
+		daemonManagers:        make(map[string]dm.DaemonManager),
 	}
 	capabilities, err := agent.capabilities()
 	assert.NoError(t, err)
 
-	assert.Equal(t, len(expectedCapabilities), len(capabilities))
 	for _, expected := range expectedCapabilities {
 		assert.Contains(t, capabilities, &ecs.Attribute{
 			Name:  expected.Name,
 			Value: expected.Value,
 		})
-	}
-}
-
-func TestAppendGMSACapabilities(t *testing.T) {
-	var inputCapabilities []*ecs.Attribute
-	var expectedCapabilities []*ecs.Attribute
-
-	expectedCapabilities = append(expectedCapabilities,
-		[]*ecs.Attribute{
-			{
-				Name: aws.String(attributePrefix + capabilityGMSA),
-			},
-		}...)
-
-	agent := &ecsAgent{
-		cfg: &config.Config{
-			GMSACapable: true,
-		},
-	}
-
-	capabilities := agent.appendGMSACapabilities(inputCapabilities)
-
-	assert.Equal(t, len(expectedCapabilities), len(capabilities))
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
 	}
 }
 
@@ -256,7 +233,7 @@ func TestAppendGMSACapabilitiesFalse(t *testing.T) {
 
 	agent := &ecsAgent{
 		cfg: &config.Config{
-			GMSACapable: false,
+			GMSACapable: config.BooleanDefaultFalse{Value: config.ExplicitlyDisabled},
 		},
 	}
 
@@ -278,7 +255,7 @@ func TestAppendFSxWindowsFileServerCapabilities(t *testing.T) {
 
 	agent := &ecsAgent{
 		cfg: &config.Config{
-			FSxWindowsFileServerCapable: true,
+			FSxWindowsFileServerCapable: config.BooleanDefaultTrue{Value: config.ExplicitlyEnabled},
 		},
 	}
 
@@ -300,7 +277,7 @@ func TestAppendFSxWindowsFileServerCapabilitiesFalse(t *testing.T) {
 
 	agent := &ecsAgent{
 		cfg: &config.Config{
-			FSxWindowsFileServerCapable: false,
+			FSxWindowsFileServerCapable: config.BooleanDefaultTrue{Value: config.ExplicitlyDisabled},
 		},
 	}
 

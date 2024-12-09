@@ -1,4 +1,5 @@
 //go:build !linux
+// +build !linux
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -20,11 +21,11 @@ import (
 	"time"
 
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
-	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
-	"github.com/aws/amazon-ecs-agent/agent/api/task/status"
-	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/api/task/status"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/credentials"
 )
 
 const (
@@ -52,7 +53,7 @@ type FirelensResource struct{}
 // NewFirelensResource returns a new FirelensResource.
 func NewFirelensResource(cluster, taskARN, taskDefinition, ec2InstanceID, dataDir, firelensConfigType, region, networkMode string,
 	firelensOptions map[string]string, containerToLogOptions map[string]map[string]string, credentialsManager credentials.Manager,
-	executionCredentialsID string) (*FirelensResource, error) {
+	executionCredentialsID string, containerMemoryLimit int64) (*FirelensResource, error) {
 	return nil, errors.New("not implemented")
 }
 

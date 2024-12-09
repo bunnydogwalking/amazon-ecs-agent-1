@@ -1,4 +1,5 @@
 //go:build unit
+// +build unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -114,6 +115,16 @@ func TestDockerVersionMatches(t *testing.T) {
 		{
 			version:        "1.9",
 			selector:       ">=1.9,<=1.9",
+			expectedOutput: true,
+		},
+		{
+			version:        "1.24",
+			selector:       ">=1.24",
+			expectedOutput: true,
+		},
+		{
+			version:        "1.25",
+			selector:       ">=1.24",
 			expectedOutput: true,
 		},
 	}

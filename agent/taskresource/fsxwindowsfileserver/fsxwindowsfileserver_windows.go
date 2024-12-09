@@ -1,4 +1,5 @@
 //go:build windows
+// +build windows
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -19,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -30,21 +30,23 @@ import (
 	"github.com/aws/aws-sdk-go/aws/arn"
 
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
-	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
-	"github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	asmfactory "github.com/aws/amazon-ecs-agent/agent/asm/factory"
-	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/fsx"
 	fsxfactory "github.com/aws/amazon-ecs-agent/agent/fsx/factory"
 	ssmfactory "github.com/aws/amazon-ecs-agent/agent/ssm/factory"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/api/task/status"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/credentials"
 	"github.com/cihub/seelog"
 	"github.com/pkg/errors"
 )
 
 const (
+	psCredentialCommandFormat = "$(New-Object System.Management.Automation.PSCredential('%s', $(ConvertTo-SecureString '%s' -AsPlainText -Force)))"
 	resourceProvisioningError = "VolumeError: Agent could not create task's volume resources"
+	fsxVolumeType             = "fsx"
 )
 
 // FSxWindowsFileServerResource represents a fsxwindowsfileserver resource
@@ -291,6 +293,20 @@ func (cfg *FSxWindowsFileServerVolumeConfig) Source() string {
 	return utils.GetCanonicalPath(cfg.HostPath)
 }
 
+func (cfg *FSxWindowsFileServerVolumeConfig) GetType() string {
+	return fsxVolumeType
+}
+
+func (cfg *FSxWindowsFileServerVolumeConfig) GetVolumeId() string {
+	return cfg.FileSystemID
+}
+
+// Note: The name is within the FSxWindowsFileServerResource struct. In order to use this in the future, this needs to be modified.
+// Currently not meant for use
+func (cfg *FSxWindowsFileServerVolumeConfig) GetVolumeName() string {
+	return ""
+}
+
 // GetName safely returns the name of the fsxwindowsfileserver resource
 func (fv *FSxWindowsFileServerResource) GetName() string {
 	fv.lock.RLock()
@@ -462,15 +478,24 @@ func (fv *FSxWindowsFileServerResource) retrieveSSMCredentials(credentialsParame
 	}
 
 	ssmClient := fv.ssmClientCreator.NewSSMClient(fv.region, iamCredentials)
-	ssmParam := filepath.Base(parsedARN.Resource)
-	ssmParams := []string{ssmParam}
+	// parsedARN.Resource looks like "arn:aws:ssm:us-west-2:123456789012:parameter/sample1/sample2/parameter1"
+	// We cut by parameter and get "arn:aws:ssm:us-west-2:123456789012:parameter", "/sample1/sample2/parameter1", True/False
+	_, ssmParamName, found := strings.Cut(parsedARN.Resource, "parameter")
+	if !found {
+		err = errors.New("unxpected error. expected fsx credential ssm arn but did not find string 'parameter' in the arn")
+		fv.setTerminalReason(err.Error())
+		return err
+
+	}
+
+	ssmParams := []string{ssmParamName}
 
 	ssmParamMap, err := ssm.GetParametersFromSSM(ssmParams, ssmClient)
 	if err != nil {
 		return err
 	}
 
-	ssmParamData, _ := ssmParamMap[ssmParam]
+	ssmParamData, _ := ssmParamMap[ssmParamName]
 	creds := FSxWindowsFileServerCredentials{}
 
 	if err := json.Unmarshal([]byte(ssmParamData), &creds); err != nil {
@@ -547,23 +572,32 @@ func (fv *FSxWindowsFileServerResource) performHostMount(remotePath string, user
 	}
 
 	// formatting to keep powershell happy
-	creds := fmt.Sprintf("-Credential $(New-Object System.Management.Automation.PSCredential(\"%s\", $(ConvertTo-SecureString \"%s\" -AsPlainText -Force)))", username, password)
-	remotePathArg := fmt.Sprintf("-RemotePath \"%s\"", remotePath)
+	// Replace ' with '' so that Powershell would convert it back to '.
+	password = strings.ReplaceAll(password, "'", "''")
+	credsCommand := fmt.Sprintf(psCredentialCommandFormat, username, password)
+	credsArg := fmt.Sprintf("-Credential %s", credsCommand)
+
+	remotePathArg := fmt.Sprintf("-RemotePath '%s'", remotePath)
 
 	// New-SmbGlobalMapping cmdlet creates an SMB mapping between the container instance
 	// and SMB share (FSx for Windows File Server file-system)
-	cmd := execCommand("powershell.exe",
+
+	args := []string{
 		"New-SmbGlobalMapping",
 		localPathArg,
 		remotePathArg,
-		creds,
+		credsArg,
 		"-Persistent $true",
 		"-RequirePrivacy $true",
-		"-ErrorAction Stop")
+		"-ErrorAction Stop",
+	}
+	seelog.Debugf("Executing mapping of fsxwindowsfileserver with cmd: %v %v", strings.Join(args[:3], " "), strings.Join(args[4:], " "))
 
-	_, err = cmd.CombinedOutput()
+	cmd := execCommand("powershell.exe", args...)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		seelog.Errorf("Failed to map fsxwindowsfileserver resource on the container instance: %v", err)
+		safeOutput := strings.ReplaceAll(string(out), password, "<pass>")
+		seelog.Errorf("Failed to map fsxwindowsfileserver resource on the container instance error: %v, out: %v", err, safeOutput)
 		fv.setTerminalReason(err.Error())
 		return err
 	}
@@ -685,7 +719,7 @@ func (fv *FSxWindowsFileServerResource) updateAppliedStatusUnsafe(knownStatus re
 // GetAppliedStatus safely returns the currently applied status of the resource
 func (fv *FSxWindowsFileServerResource) GetAppliedStatus() resourcestatus.ResourceStatus {
 	fv.lock.RLock()
-	defer fv.lock.RLock()
+	defer fv.lock.RUnlock()
 
 	return fv.appliedStatusUnsafe
 }

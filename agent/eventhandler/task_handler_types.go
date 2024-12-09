@@ -15,16 +15,18 @@ package eventhandler
 
 import (
 	"container/list"
-	"fmt"
 	"sync"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
-	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
-	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/agent/data"
-	"github.com/aws/amazon-ecs-agent/agent/utils/retry"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/api/ecs"
+	apitaskstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/task/status"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/logger/field"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/utils/retry"
 	"github.com/cihub/seelog"
 )
 
@@ -74,6 +76,11 @@ func (event *sendableEvent) taskShouldBeSent() bool {
 
 	// task and container change event should have task != nil
 	if tevent.Task == nil {
+		return false
+	}
+
+	//  internal task state change does not need to be sent
+	if tevent.Task.IsInternal {
 		return false
 	}
 
@@ -143,42 +150,57 @@ func (event *sendableEvent) send(
 	sendStatusToECS sendStatusChangeToECS,
 	setChangeSent setStatusSent,
 	eventType string,
-	client api.ECSClient,
+	client ecs.ECSClient,
 	eventToSubmit *list.Element,
 	dataClient data.Client,
 	backoff retry.Backoff,
 	taskEvents *taskSendableEvents) error {
 
-	seelog.Infof("TaskHandler: Sending %s change: %s", eventType, event.toString())
+	fields := event.toFields()
+	logger.Info("Sending state change to ECS", fields)
 	// Try submitting the change to ECS
 	if err := sendStatusToECS(client, event); err != nil {
-		seelog.Errorf("TaskHandler: Unretriable error submitting %s state change [%s]: %v",
-			eventType, event.toString(), err)
+		fields[field.Error] = err
+		logger.Error("Unretriable error sending state change to ECS", fields)
 		return err
 	}
 	// submitted; ensure we don't retry it
 	event.setSent()
 	// Mark event as sent
 	setChangeSent(event, dataClient)
-	seelog.Debugf("TaskHandler: Submitted task state change: %s", event.toString())
+	logger.Debug("Submitted state change to ECS", fields)
 	taskEvents.events.Remove(eventToSubmit)
 	backoff.Reset()
 	return nil
 }
 
 // sendStatusChangeToECS defines a function type for invoking the appropriate ECS state change API
-type sendStatusChangeToECS func(client api.ECSClient, event *sendableEvent) error
+type sendStatusChangeToECS func(client ecs.ECSClient, event *sendableEvent) error
 
 // sendContainerStatusToECS invokes the SubmitContainerStateChange API to send a
 // container status change to ECS
-func sendContainerStatusToECS(client api.ECSClient, event *sendableEvent) error {
-	return client.SubmitContainerStateChange(event.containerChange)
+func sendContainerStatusToECS(client ecs.ECSClient, event *sendableEvent) error {
+	containerStateChange, err := event.containerChange.ToECSAgent()
+	if err != nil {
+		return err
+	}
+
+	// containerStateChange and err both nil in the case of an unsupported upstream container state.
+	// No-op (i.e., don't submit container state change) in this case.
+	if containerStateChange == nil {
+		return nil
+	}
+	return client.SubmitContainerStateChange(*containerStateChange)
 }
 
 // sendTaskStatusToECS invokes the SubmitTaskStateChange API to send a task
 // status change to ECS
-func sendTaskStatusToECS(client api.ECSClient, event *sendableEvent) error {
-	return client.SubmitTaskStateChange(event.taskChange)
+func sendTaskStatusToECS(client ecs.ECSClient, event *sendableEvent) error {
+	taskStateChange, err := event.taskChange.ToECSAgent()
+	if err != nil {
+		return err
+	}
+	return client.SubmitTaskStateChange(*taskStateChange)
 }
 
 // setStatusSent defines a function type to mark the event as sent
@@ -222,14 +244,14 @@ func setTaskAttachmentSent(event *sendableEvent, dataClient data.Client) {
 	}
 }
 
-func (event *sendableEvent) toString() string {
+func (event *sendableEvent) toFields() logger.Fields {
 	event.lock.RLock()
 	defer event.lock.RUnlock()
 
 	if event.isContainerEvent {
-		return "ContainerChange: [" + event.containerChange.String() + fmt.Sprintf("] sent: %t", event.containerSent)
+		return event.containerChange.ToFields()
 	} else {
-		return "TaskChange: [" + event.taskChange.String() + fmt.Sprintf("] sent: %t", event.taskSent)
+		return event.taskChange.ToFields()
 	}
 }
 

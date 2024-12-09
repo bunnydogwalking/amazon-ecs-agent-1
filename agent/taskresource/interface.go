@@ -18,9 +18,9 @@ import (
 	"time"
 
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
-	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
-	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
+	apitaskstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/task/status"
 )
 
 // TaskResource is a wrapper for task level resource methods we need
@@ -43,7 +43,7 @@ type TaskResource interface {
 	Cleanup() error
 	// GetName returns the unique name of the resource
 	GetName() string
-	// DesiredTeminal returns true if remove is in terminal state
+	// DesiredTerminal returns true if remove is in terminal state
 	DesiredTerminal() bool
 	// KnownCreated returns true if resource state is CREATED
 	KnownCreated() bool
@@ -72,7 +72,7 @@ type TaskResource interface {
 	// BuildContainerDependency adds a new dependency container and its satisfied status
 	BuildContainerDependency(containerName string, satisfied apicontainerstatus.ContainerStatus,
 		dependent resourcestatus.ResourceStatus)
-	// Initialize will initialze the resource fields of the resource
+	// Initialize will initialize the resource fields of the resource
 	Initialize(res *ResourceFields,
 		taskKnownStatus apitaskstatus.TaskStatus, taskDesiredStatus apitaskstatus.TaskStatus)
 

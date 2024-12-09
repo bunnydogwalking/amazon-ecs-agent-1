@@ -1,4 +1,5 @@
 //go:build !windows
+// +build !windows
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -29,7 +30,7 @@ import (
 var (
 	testImageName    = "amazon/amazon-ecs-gremlin:make"
 	endpoint         = utils.DefaultIfBlank(os.Getenv(ecsengine.DockerEndpointEnvVariable), ecsengine.DockerDefaultEndpoint)
-	client, _        = sdkClient.NewClientWithOpts(sdkClient.WithHost(endpoint), sdkClient.WithVersion(sdkclientfactory.GetDefaultVersion().String()))
 	sdkClientFactory = sdkclientfactory.NewFactory(context.TODO(), endpoint)
+	client, _        = sdkClient.NewClientWithOpts(sdkClient.WithHost(endpoint), sdkClient.WithVersion(sdkclientfactory.GetDefaultVersion().String()))
 	ctx              = context.TODO()
 )

@@ -1,4 +1,5 @@
 //go:build linux && unit
+// +build linux,unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -23,10 +24,10 @@ import (
 
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
-	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
 	mock_netlink "github.com/aws/amazon-ecs-agent/agent/eni/netlinkwrapper/mocks"
 	mock_resolver "github.com/aws/amazon-ecs-agent/agent/stats/resolver/mock"
 	mock_nswrapper "github.com/aws/amazon-ecs-agent/agent/utils/nswrapper/mocks"
+	apitaskstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/task/status"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -34,6 +35,7 @@ import (
 )
 
 func TestTaskStatsCollection(t *testing.T) {
+	t.Parallel()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	resolver := mock_resolver.NewMockContainerMetadataResolver(ctrl)
@@ -96,6 +98,7 @@ func TestTaskStatsCollection(t *testing.T) {
 }
 
 func TestTaskStatsCollectionError(t *testing.T) {
+	t.Parallel()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	resolver := mock_resolver.NewMockContainerMetadataResolver(ctrl)

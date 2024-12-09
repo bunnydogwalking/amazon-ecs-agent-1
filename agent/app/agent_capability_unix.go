@@ -1,4 +1,5 @@
 //go:build linux
+// +build linux
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -16,27 +17,34 @@
 package app
 
 import (
+	"context"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
-	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/api/ecs/model/ecs"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/utils/execwrapper"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/cihub/seelog"
 )
 
 const (
-	AVX                   = "avx"
-	AVX2                  = "avx2"
-	SSE41                 = "sse4_1"
-	SSE42                 = "sse4_2"
-	CpuInfoPath           = "/proc/cpuinfo"
-	capabilityDepsRootDir = "/managed-agents"
+	AVX                         = "avx"
+	AVX2                        = "avx2"
+	SSE41                       = "sse4_1"
+	SSE42                       = "sse4_2"
+	CpuInfoPath                 = "/proc/cpuinfo"
+	capabilityDepsRootDir       = "/managed-agents"
+	modInfoCmd                  = "modinfo"
+	faultInjectionKernelModules = "sch_netem"
+	ctxTimeoutDuration          = 60 * time.Second
 )
 
 var (
@@ -103,6 +111,10 @@ func (agent *ecsAgent) appendNvidiaDriverVersionAttribute(capabilities []*ecs.At
 		driverVersion := agent.resourceFields.NvidiaGPUManager.GetDriverVersion()
 		if driverVersion != "" {
 			capabilities = appendNameOnlyAttribute(capabilities, attributePrefix+capabilityNvidiaDriverVersionInfix+driverVersion)
+			capabilities = append(capabilities, &ecs.Attribute{
+				Name:  aws.String(attributePrefix + capabilityGpuDriverVersion),
+				Value: aws.String(driverVersion),
+			})
 		}
 	}
 	return capabilities
@@ -199,10 +211,6 @@ func (agent *ecsAgent) appendFirelensConfigCapabilities(capabilities []*ecs.Attr
 	return appendNameOnlyAttribute(capabilities, attributePrefix+capabilityFirelensConfigS3)
 }
 
-func (agent *ecsAgent) appendGMSACapabilities(capabilities []*ecs.Attribute) []*ecs.Attribute {
-	return capabilities
-}
-
 func (agent *ecsAgent) appendIPv6Capability(capabilities []*ecs.Attribute) []*ecs.Attribute {
 	return appendNameOnlyAttribute(capabilities, attributePrefix+taskENIIPv6AttributeSuffix)
 }
@@ -218,11 +226,11 @@ func (agent *ecsAgent) appendFSxWindowsFileServerCapabilities(capabilities []*ec
 // doesn't contribute to placement decisions and just serves as additional
 // debugging information
 func (agent *ecsAgent) getTaskENIPluginVersionAttribute() (*ecs.Attribute, error) {
-	version, err := agent.cniClient.Version(ecscni.ECSENIPluginName)
+	version, err := agent.cniClient.Version(ecscni.VPCENIPluginName)
 	if err != nil {
 		seelog.Warnf(
 			"Unable to determine the version of the plugin '%s': %v",
-			ecscni.ECSENIPluginName, err)
+			ecscni.VPCENIPluginName, err)
 		return nil, err
 	}
 
@@ -234,4 +242,39 @@ func (agent *ecsAgent) getTaskENIPluginVersionAttribute() (*ecs.Attribute, error
 
 func defaultIsPlatformExecSupported() (bool, error) {
 	return true, nil
+}
+
+// var to allow mocking for checkNetworkTooling
+var isFaultInjectionToolingAvailable = checkFaultInjectionTooling
+
+// wrapper around exec.LookPath
+var lookPathFunc = exec.LookPath
+var osExecWrapper = execwrapper.NewExec()
+
+// checkFaultInjectionTooling checks for the required network packages like iptables, tc
+// to be available on the host before ecs.capability.fault-injection can be advertised
+func checkFaultInjectionTooling() bool {
+	tools := []string{"iptables", "tc", "nsenter"}
+	for _, tool := range tools {
+		if _, err := lookPathFunc(tool); err != nil {
+			seelog.Warnf(
+				"Failed to find network tool %s that is needed for fault-injection feature: %v",
+				tool, err)
+			return false
+		}
+	}
+	return checkFaultInjectionModules()
+}
+
+// checkFaultInjectionModules checks for the required kernel modules such as sch_netem to be installed
+// and avaialble on the host before ecs.capability.fault-injection can be advertised
+func checkFaultInjectionModules() bool {
+	ctxWithTimeout, cancel := context.WithTimeout(context.Background(), ctxTimeoutDuration)
+	defer cancel()
+	_, err := osExecWrapper.CommandContext(ctxWithTimeout, modInfoCmd, faultInjectionKernelModules).CombinedOutput()
+	if err != nil {
+		seelog.Warnf("Failed to find kernel module %s that is needed for fault-injection feature: %v", faultInjectionKernelModules, err)
+		return false
+	}
+	return true
 }

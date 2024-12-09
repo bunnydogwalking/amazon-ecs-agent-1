@@ -1,4 +1,5 @@
 //go:build !windows && unit
+// +build !windows,unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -17,8 +18,10 @@ package stats
 import (
 	"encoding/json"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/stretchr/testify/assert"
@@ -52,8 +55,44 @@ func TestDockerStatsToContainerStatsEmptyCpuUsageGeneratesError(t *testing.T) {
 	jsonBytes, _ := ioutil.ReadFile(inputJsonFile)
 	dockerStat := &types.StatsJSON{}
 	json.Unmarshal([]byte(jsonBytes), dockerStat)
-	// empty the PercpuUsage array
-	dockerStat.CPUStats.CPUUsage.PercpuUsage = make([]uint64, 0)
-	err := validateDockerStats(dockerStat)
-	assert.Error(t, err, "expected error converting container stats with empty PercpuUsage")
+	prevNumCores := numCores
+	numCores = uint64(0)
+	err := validateDockerStats(dockerStat, false)
+	assert.Error(t, err, "expected error converting container stats with numCores=0")
+	numCores = prevNumCores
+}
+
+func TestValidateDockerStatsZeroValueReadTime(t *testing.T) {
+	testCases := []struct {
+		name                          string
+		containerEnabledRestartPolicy bool
+	}{
+		{
+			name:                          "container does not have restart policy enabled",
+			containerEnabledRestartPolicy: false,
+		},
+		{
+			name:                          "container has restart policy enabled",
+			containerEnabledRestartPolicy: true,
+		},
+	}
+	inputJsonFile, _ := filepath.Abs("./unix_test_stats.json")
+	jsonBytes, err := os.ReadFile(inputJsonFile)
+	assert.NoError(t, err)
+	dockerStat := &types.StatsJSON{}
+	json.Unmarshal(jsonBytes, dockerStat)
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Set read time of docker stat to zero value of time.Time.
+			dockerStat.Read = time.Time{}
+			err = validateDockerStats(dockerStat, tc.containerEnabledRestartPolicy)
+			if tc.containerEnabledRestartPolicy {
+				assert.Error(t, err)
+				assert.ErrorContains(t, err, invalidStatZeroValueReadTimeMsg)
+			} else {
+				assert.NoError(t, nil)
+			}
+		})
+	}
 }

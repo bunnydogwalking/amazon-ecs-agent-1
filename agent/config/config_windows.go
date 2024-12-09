@@ -1,4 +1,5 @@
 //go:build windows
+// +build windows
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -24,6 +25,7 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/tmds"
 
 	"github.com/cihub/seelog"
 	"github.com/hectane/go-acl/api"
@@ -55,6 +57,10 @@ const (
 	dnsPort = 53
 	// NetBIOS over TCP/IP
 	netBIOSPort = 139
+	// minimumManifestPullTimeout is the minimum timeout allowed for manifest pulls
+	minimumManifestPullTimeout = 30 * time.Second
+	// defaultManifestPullTimeout is the default timeout for manifest pulls
+	defaultManifestPullTimeout = 1 * time.Minute
 	// defaultContainerStartTimeout specifies the value for container start timeout duration
 	defaultContainerStartTimeout = 8 * time.Minute
 	// minimumContainerStartTimeout specifies the minimum value for starting a container
@@ -70,6 +76,11 @@ const (
 	adminSid = "S-1-5-32-544"
 	// default directory name of CNI Plugins
 	defaultCNIPluginDirName = "cni"
+	// Setting the node stage and unstage timeout to 600 seconds as Windows takes longer to stage and unstage volumes
+	// nodeStageTimeout is the deafult timeout for staging an EBS TA volume
+	nodeStageTimeout = 600 * time.Second
+	// nodeUnstageTimeout is the deafult timeout for unstaging an EBS TA volume
+	nodeUnstageTimeout = 600 * time.Second
 )
 
 var (
@@ -91,6 +102,7 @@ func DefaultConfig() Config {
 
 	programFiles := utils.DefaultIfBlank(os.Getenv("ProgramFiles"), `C:\Program Files`)
 	ecsBinaryDir := filepath.Join(programFiles, "Amazon", "ECS")
+	defaultCSIDriverSocketPath := filepath.Join(ecsRoot, "ebs-csi-driver", "csi-driver.sock")
 
 	platformVariables := PlatformVariables{
 		CPUUnbounded:    BooleanDefaultFalse{Value: ExplicitlyDisabled},
@@ -102,7 +114,7 @@ func DefaultConfig() Config {
 			DockerReservedPort,
 			DockerReservedSSLPort,
 			AgentIntrospectionPort,
-			AgentCredentialsPort,
+			tmds.Port,
 			rdpPort,
 			rpcPort,
 			smbPort,
@@ -119,6 +131,7 @@ func DefaultConfig() Config {
 		ReservedMemory:                      0,
 		AvailableLoggingDrivers:             []dockerclient.LoggingDriver{dockerclient.JSONFileDriver, dockerclient.NoneDriver, dockerclient.AWSLogsDriver},
 		TaskCleanupWaitDuration:             DefaultTaskCleanupWaitDuration,
+		ManifestPullTimeout:                 defaultManifestPullTimeout,
 		DockerStopTimeout:                   defaultDockerStopTimeout,
 		ContainerStartTimeout:               defaultContainerStartTimeout,
 		ContainerCreateTimeout:              defaultContainerCreateTimeout,
@@ -141,14 +154,18 @@ func DefaultConfig() Config {
 		SharedVolumeMatchFullConfig:         BooleanDefaultFalse{Value: ExplicitlyDisabled}, //only requiring shared volumes to match on name, which is default docker behavior
 		PollMetrics:                         BooleanDefaultFalse{Value: NotSet},
 		PollingMetricsWaitDuration:          DefaultPollingMetricsWaitDuration,
-		GMSACapable:                         true,
-		FSxWindowsFileServerCapable:         true,
+		GMSACapable:                         BooleanDefaultFalse{Value: ExplicitlyDisabled},
+		GMSADomainlessCapable:               BooleanDefaultFalse{Value: ExplicitlyDisabled},
+		FSxWindowsFileServerCapable:         BooleanDefaultTrue{Value: NotSet},
 		PauseContainerImageName:             DefaultPauseContainerImageName,
 		PauseContainerTag:                   DefaultPauseContainerTag,
 		CNIPluginsPath:                      filepath.Join(ecsBinaryDir, defaultCNIPluginDirName),
 		RuntimeStatsLogFile:                 filepath.Join(ecsRoot, defaultRuntimeStatsLogFile),
 		EnableRuntimeStats:                  BooleanDefaultFalse{Value: NotSet},
 		ShouldExcludeIPv6PortBinding:        BooleanDefaultTrue{Value: ExplicitlyEnabled},
+		CSIDriverSocketPath:                 defaultCSIDriverSocketPath,
+		NodeStageTimeout:                    nodeStageTimeout,
+		NodeUnstageTimeout:                  nodeUnstageTimeout,
 	}
 }
 
@@ -205,10 +222,7 @@ func validateConfigFile(configFileName string) (bool, error) {
 	}
 	defer windows.LocalFree(handle)
 
-	id, err := Sid.String()
-	if err != nil {
-		return false, err
-	}
+	id := Sid.String()
 
 	if id == adminSid {
 		return true, nil

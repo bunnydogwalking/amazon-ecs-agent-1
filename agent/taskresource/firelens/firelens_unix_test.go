@@ -1,4 +1,5 @@
 //go:build linux && unit
+// +build linux,unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -22,21 +23,22 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/golang/mock/gomock"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/aws/amazon-ecs-agent/agent/api/task/status"
-	"github.com/aws/amazon-ecs-agent/agent/credentials"
-	mock_credentials "github.com/aws/amazon-ecs-agent/agent/credentials/mocks"
 	mock_factory "github.com/aws/amazon-ecs-agent/agent/s3/factory/mocks"
-	mock_s3 "github.com/aws/amazon-ecs-agent/agent/s3/mocks"
+	mock_s3 "github.com/aws/amazon-ecs-agent/agent/s3/mocks/s3manager"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
 	mock_ioutilwrapper "github.com/aws/amazon-ecs-agent/agent/utils/ioutilwrapper/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/utils/oswrapper"
 	mock_oswrapper "github.com/aws/amazon-ecs-agent/agent/utils/oswrapper/mocks"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/api/task/status"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/credentials"
+	mock_credentials "github.com/aws/amazon-ecs-agent/ecs-agent/credentials/mocks"
 )
 
 const (
@@ -52,6 +54,7 @@ const (
 	testExecutionCredentialsID = "testexecutioncredentialsid"
 	testExternalConfigType     = "testexternalconfigtype"
 	testExternalConfigValue    = "testexternalconfigvalue"
+	testContainerMemoryLimit   = 100
 )
 
 var (
@@ -69,14 +72,14 @@ var (
 )
 
 func setup(t *testing.T) (oswrapper.File, *mock_ioutilwrapper.MockIOUtil,
-	*mock_credentials.MockManager, *mock_factory.MockS3ClientCreator, *mock_s3.MockS3Client, func()) {
+	*mock_credentials.MockManager, *mock_factory.MockS3ClientCreator, *mock_s3.MockS3ManagerClient, func()) {
 	ctrl := gomock.NewController(t)
 
 	mockFile := mock_oswrapper.NewMockFile()
 	mockIOUtil := mock_ioutilwrapper.NewMockIOUtil(ctrl)
 	mockCredentialsManager := mock_credentials.NewMockManager(ctrl)
 	mockS3ClientCreator := mock_factory.NewMockS3ClientCreator(ctrl)
-	mockS3Client := mock_s3.NewMockS3Client(ctrl)
+	mockS3Client := mock_s3.NewMockS3ManagerClient(ctrl)
 
 	return mockFile, mockIOUtil, mockCredentialsManager, mockS3ClientCreator, mockS3Client, ctrl.Finish
 }
@@ -103,7 +106,7 @@ func mockMkdirAllError() func() {
 
 func newMockFirelensResource(firelensConfigType, networkMode string, lopOptions map[string]string,
 	mockIOUtil *mock_ioutilwrapper.MockIOUtil, mockCredentialsManager *mock_credentials.MockManager,
-	mockS3ClientCreator *mock_factory.MockS3ClientCreator) *FirelensResource {
+	mockS3ClientCreator *mock_factory.MockS3ClientCreator, containerMemoryReservation int64) *FirelensResource {
 	return &FirelensResource{
 		cluster:            testCluster,
 		taskARN:            testTaskARN,
@@ -120,6 +123,7 @@ func newMockFirelensResource(firelensConfigType, networkMode string, lopOptions 
 		credentialsManager:     mockCredentialsManager,
 		ioutil:                 mockIOUtil,
 		s3ClientCreator:        mockS3ClientCreator,
+		containerMemoryLimit:   containerMemoryReservation,
 	}
 }
 
@@ -156,7 +160,7 @@ func TestCreateFirelensResourceFluentdBridgeMode(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	defer mockRename()()
 	gomock.InOrder(
@@ -171,7 +175,7 @@ func TestCreateFirelensResourceFluentdAWSVPCMode(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, awsvpcNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	defer mockRename()()
 	gomock.InOrder(
@@ -186,7 +190,7 @@ func TestCreateFirelensResourceFluentdDefaultMode(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, "", testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	defer mockRename()()
 	gomock.InOrder(
@@ -201,7 +205,7 @@ func TestCreateFirelensResourceFluentbit(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentbit, bridgeNetworkMode, testFluentbitOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	defer mockRename()()
 	gomock.InOrder(
@@ -216,7 +220,7 @@ func TestCreateFirelensResourceInvalidType(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 	firelensResource.firelensConfigType = "invalid"
 
 	assert.Error(t, firelensResource.Create())
@@ -228,7 +232,7 @@ func TestCreateFirelensResourceCreateConfigDirError(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	defer mockMkdirAllError()()
 
@@ -241,7 +245,7 @@ func TestCreateFirelensResourceCreateSocketDirError(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	defer mockMkdirAllError()()
 
@@ -254,7 +258,7 @@ func TestCreateFirelensResourceGenerateConfigError(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 	firelensResource.containerToLogOptions = map[string]map[string]string{
 		"container": {
 			"invalid": "invalid",
@@ -270,7 +274,7 @@ func TestCreateFirelensResourceCreateTempFileError(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	gomock.InOrder(
 		mockIOUtil.EXPECT().TempFile(testResourceDir, tempFile).Return(nil, errors.New("test error")),
@@ -285,7 +289,7 @@ func TestCreateFirelensResourceWriteConfigFileError(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	mockFile.(*mock_oswrapper.MockFile).WriteImpl = func(bytes []byte) (i int, e error) {
 		return 0, errors.New("test error")
@@ -304,7 +308,7 @@ func TestCreateFirelensResourceChmodError(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	mockFile.(*mock_oswrapper.MockFile).ChmodImpl = func(mode os.FileMode) error {
 		return errors.New("test error")
@@ -323,7 +327,7 @@ func TestCreateFirelensResourceRenameError(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	gomock.InOrder(
 		mockIOUtil.EXPECT().TempFile(testResourceDir, tempFile).Return(mockFile, nil),
@@ -345,7 +349,7 @@ func TestCreateFirelensResourceWithS3Config(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	err := firelensResource.parseOptions(testFirelensOptionsS3)
 	require.NoError(t, err)
@@ -362,11 +366,11 @@ func TestCreateFirelensResourceWithS3Config(t *testing.T) {
 
 	gomock.InOrder(
 		mockCredentialsManager.EXPECT().GetTaskCredentials(testExecutionCredentialsID).Return(creds, true),
-		mockS3ClientCreator.EXPECT().NewS3ClientForBucket("bucket", testRegion, creds.IAMRoleCredentials).Return(mockS3Client, nil),
+		mockS3ClientCreator.EXPECT().NewS3ManagerClient("bucket", testRegion, creds.IAMRoleCredentials).Return(mockS3Client, nil),
 		// write external config file downloaded from s3
 		mockIOUtil.EXPECT().TempFile(testResourceDir, tempFile).Return(mockFile, nil),
-		mockS3Client.EXPECT().DownloadWithContext(gomock.Any(), mockFile, gomock.Any()).Do(
-			func(ctx aws.Context, w io.WriterAt, input *s3.GetObjectInput) {
+		mockS3Client.EXPECT().DownloadWithContext(gomock.Any(), mockFile, gomock.Any(), gomock.Any()).Do(
+			func(ctx aws.Context, w io.WriterAt, input *s3.GetObjectInput, options ...func(*s3manager.Downloader)) {
 				assert.Equal(t, "bucket", aws.StringValue(input.Bucket))
 				assert.Equal(t, "key", aws.StringValue(input.Key))
 			}).Return(int64(0), nil),
@@ -383,7 +387,7 @@ func TestCreateFirelensResourceWithS3ConfigMissingCredentials(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	err := firelensResource.parseOptions(testFirelensOptionsS3)
 	require.NoError(t, err)
@@ -401,7 +405,7 @@ func TestCreateFirelensResourceWithS3ConfigInvalidS3ARN(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	err := firelensResource.parseOptions(testFirelensOptionsS3)
 	require.NoError(t, err)
@@ -420,7 +424,7 @@ func TestCreateFirelensResourceWithS3ConfigDownloadFailure(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	err := firelensResource.parseOptions(testFirelensOptionsS3)
 	require.NoError(t, err)
@@ -434,7 +438,7 @@ func TestCreateFirelensResourceWithS3ConfigDownloadFailure(t *testing.T) {
 	}
 	gomock.InOrder(
 		mockCredentialsManager.EXPECT().GetTaskCredentials(testExecutionCredentialsID).Return(creds, true),
-		mockS3ClientCreator.EXPECT().NewS3ClientForBucket("bucket", testRegion, creds.IAMRoleCredentials).Return(mockS3Client, nil),
+		mockS3ClientCreator.EXPECT().NewS3ManagerClient("bucket", testRegion, creds.IAMRoleCredentials).Return(mockS3Client, nil),
 		mockIOUtil.EXPECT().TempFile(testResourceDir, tempFile).Return(mockFile, nil),
 		mockS3Client.EXPECT().DownloadWithContext(gomock.Any(), mockFile, gomock.Any()).Return(int64(0), errors.New("test error")),
 	)
@@ -448,7 +452,7 @@ func TestCleanupFirelensResource(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	assert.NoError(t, firelensResource.Cleanup())
 }
@@ -458,7 +462,7 @@ func TestCleanupFirelensResourceError(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, mockIOUtil,
-		mockCredentialsManager, mockS3ClientCreator)
+		mockCredentialsManager, mockS3ClientCreator, testContainerMemoryLimit)
 
 	removeAll = func(path string) error {
 		return errors.New("test error")
@@ -476,7 +480,7 @@ func TestInitializeFirelensResource(t *testing.T) {
 	defer done()
 
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, nil, nil,
-		nil)
+		nil, testContainerMemoryLimit)
 	firelensResource.Initialize(&taskresource.ResourceFields{
 		ResourceFieldsCommon: &taskresource.ResourceFieldsCommon{
 			CredentialsManager: mockCredentialsManager,
@@ -492,7 +496,7 @@ func TestInitializeFirelensResource(t *testing.T) {
 
 func TestSetKnownStatus(t *testing.T) {
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, nil, nil,
-		nil)
+		nil, testContainerMemoryLimit)
 	firelensResource.appliedStatusUnsafe = resourcestatus.ResourceStatus(FirelensCreated)
 
 	firelensResource.SetKnownStatus(resourcestatus.ResourceStatus(FirelensCreated))
@@ -502,7 +506,7 @@ func TestSetKnownStatus(t *testing.T) {
 
 func TestSetKnownStatusNoAppliedStatusUpdate(t *testing.T) {
 	firelensResource := newMockFirelensResource(FirelensConfigTypeFluentd, bridgeNetworkMode, testFluentdOptions, nil, nil,
-		nil)
+		nil, testContainerMemoryLimit)
 	firelensResource.appliedStatusUnsafe = resourcestatus.ResourceStatus(FirelensCreated)
 
 	firelensResource.SetKnownStatus(resourcestatus.ResourceStatus(FirelensStatusNone))

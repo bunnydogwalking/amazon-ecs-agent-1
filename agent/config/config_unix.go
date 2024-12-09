@@ -1,4 +1,5 @@
 //go:build !windows
+// +build !windows
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -22,6 +23,7 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/tmds"
 )
 
 const (
@@ -33,12 +35,21 @@ const (
 	// defaultRuntimeStatsLogFile stores the path where the golang runtime stats are periodically logged
 	defaultRuntimeStatsLogFile = `/log/agent-runtime-stats.log`
 
-	// DefaultTaskCgroupPrefix is default cgroup prefix for ECS tasks
-	DefaultTaskCgroupPrefix = "/ecs"
+	// DefaultTaskCgroupV1Prefix is default cgroup v1 prefix for ECS tasks
+	DefaultTaskCgroupV1Prefix = "/ecs"
+	// DefaultTaskCgroupV2Prefix is default cgroup v2 prefix for ECS tasks
+	// ecstasks is used because this creates a systemd "slice", and using just
+	// ecs would create a confusing name conflict with the ecs systemd service.
+	// (we would have both ecs.service and ecs.slice in /sys/fs/cgroup).
+	DefaultTaskCgroupV2Prefix = "ecstasks"
 
 	// Default cgroup memory system root path, this is the default used if the
 	// path has not been configured through ECS_CGROUP_PATH
 	defaultCgroupPath = "/sys/fs/cgroup"
+	// minimumManifestPullTimeout is the minimum timeout allowed for manifest pulls
+	minimumManifestPullTimeout = 30 * time.Second
+	// defaultManifestPullTimeout is the default timeout for manifest pulls
+	defaultManifestPullTimeout = 1 * time.Minute
 	// defaultContainerStartTimeout specifies the value for container start timeout duration
 	defaultContainerStartTimeout = 3 * time.Minute
 	// minimumContainerStartTimeout specifies the minimum value for starting a container
@@ -49,13 +60,19 @@ const (
 	minimumContainerCreateTimeout = 1 * time.Minute
 	// default docker inactivity time is extra time needed on container extraction
 	defaultImagePullInactivityTimeout = 1 * time.Minute
+	// default socket filepath is "/var/run/ecs/ebs-csi-driver/csi-driver.sock"
+	defaultCSIDriverSocketPath = "/var/run/ecs/ebs-csi-driver/csi-driver.sock"
+	// nodeStageTimeout is the deafult timeout for staging an EBS TA volume
+	nodeStageTimeout = 2 * time.Second
+	// nodeUnstageTimeout is the deafult timeout for unstaging an EBS TA volume
+	nodeUnstageTimeout = 30 * time.Second
 )
 
 // DefaultConfig returns the default configuration for Linux
 func DefaultConfig() Config {
 	return Config{
 		DockerEndpoint:                      "unix:///var/run/docker.sock",
-		ReservedPorts:                       []uint16{SSHPort, DockerReservedPort, DockerReservedSSLPort, AgentIntrospectionPort, AgentCredentialsPort},
+		ReservedPorts:                       []uint16{SSHPort, DockerReservedPort, DockerReservedSSLPort, AgentIntrospectionPort, tmds.Port},
 		ReservedPortsUDP:                    []uint16{},
 		DataDir:                             "/data/",
 		DataDirOnHost:                       "/var/lib/ecs",
@@ -63,6 +80,7 @@ func DefaultConfig() Config {
 		ReservedMemory:                      0,
 		AvailableLoggingDrivers:             []dockerclient.LoggingDriver{dockerclient.JSONFileDriver, dockerclient.NoneDriver},
 		TaskCleanupWaitDuration:             DefaultTaskCleanupWaitDuration,
+		ManifestPullTimeout:                 defaultManifestPullTimeout,
 		DockerStopTimeout:                   defaultDockerStopTimeout,
 		ContainerStartTimeout:               defaultContainerStartTimeout,
 		ContainerCreateTimeout:              defaultContainerCreateTimeout,
@@ -94,11 +112,15 @@ func DefaultConfig() Config {
 		PollingMetricsWaitDuration:          DefaultPollingMetricsWaitDuration,
 		NvidiaRuntime:                       DefaultNvidiaRuntime,
 		CgroupCPUPeriod:                     defaultCgroupCPUPeriod,
-		GMSACapable:                         false,
-		FSxWindowsFileServerCapable:         false,
+		GMSACapable:                         parseGMSACapability(),
+		GMSADomainlessCapable:               parseGMSADomainlessCapability(),
+		FSxWindowsFileServerCapable:         BooleanDefaultTrue{Value: ExplicitlyDisabled},
 		RuntimeStatsLogFile:                 defaultRuntimeStatsLogFile,
 		EnableRuntimeStats:                  BooleanDefaultFalse{Value: NotSet},
 		ShouldExcludeIPv6PortBinding:        BooleanDefaultTrue{Value: ExplicitlyEnabled},
+		CSIDriverSocketPath:                 defaultCSIDriverSocketPath,
+		NodeStageTimeout:                    nodeStageTimeout,
+		NodeUnstageTimeout:                  nodeUnstageTimeout,
 	}
 }
 

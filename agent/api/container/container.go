@@ -15,16 +15,21 @@ package container
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
-	apierrors "github.com/aws/amazon-ecs-agent/agent/api/errors"
-	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
-
+	referenceutil "github.com/aws/amazon-ecs-agent/agent/utils/reference"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/api/container/restart"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
+	apierrors "github.com/aws/amazon-ecs-agent/ecs-agent/api/errors"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/credentials"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/logger/field"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/cihub/seelog"
 	"github.com/docker/docker/api/types"
@@ -61,8 +66,15 @@ const (
 	// v4 metadata endpoint
 	MetadataURIEnvVarNameV4 = "ECS_CONTAINER_METADATA_URI_V4"
 
-	// MetadataURIFormat defines the URI format for v4 metadata endpoint
+	// MetadataURIFormatV4 defines the URI format for v4 metadata endpoint
 	MetadataURIFormatV4 = "http://169.254.170.2/v4/%s"
+
+	// AgentURIEnvVarName defines the name of the environment variable
+	// injected into containers that contains the Agent endpoints.
+	AgentURIEnvVarName = "ECS_AGENT_URI"
+
+	// AgentURIFormat defines the URI format for Agent endpoints
+	AgentURIFormat = "http://169.254.170.2/api/%s"
 
 	// SecretProviderSSM is to show secret provider being SSM
 	SecretProviderSSM = "ssm"
@@ -73,11 +85,15 @@ const (
 	// SecretTypeEnv is to show secret type being ENVIRONMENT_VARIABLE
 	SecretTypeEnv = "ENVIRONMENT_VARIABLE"
 
-	// TargetLogDriver is to show secret target being "LOG_DRIVER", the default will be "CONTAINER"
+	// SecretTargetLogDriver is to show secret target being "LOG_DRIVER", the default will be "CONTAINER"
 	SecretTargetLogDriver = "LOG_DRIVER"
 
 	// neuronVisibleDevicesEnvVar is the env which indicates that the container wants to use inferentia devices.
 	neuronVisibleDevicesEnvVar = "AWS_NEURON_VISIBLE_DEVICES"
+
+	credentialSpecPrefix = "credentialspec"
+
+	credentialSpecDomainlessPrefix = credentialSpecPrefix + "domainless"
 )
 
 var (
@@ -190,6 +206,8 @@ type Container struct {
 	Overrides ContainerOverrides `json:"overrides"`
 	// DockerConfig is the configuration used to create the container
 	DockerConfig DockerConfig `json:"dockerConfig"`
+	// CredentialSpecs is the configuration used for configuring gMSA authentication for the container
+	CredentialSpecs []string `json:"credentialSpecs,omitempty"`
 	// RegistryAuthentication is the auth data used to pull image
 	RegistryAuthentication *RegistryAuthenticationData `json:"registryAuthentication"`
 	// HealthCheckType is the mechanism to use for the container health check
@@ -219,7 +237,7 @@ type Container struct {
 	// NOTE: Do not access DesiredStatusUnsafe directly.  Instead, use `GetDesiredStatus`
 	// and `SetDesiredStatus`.
 	// TODO DesiredStatusUnsafe should probably be private with appropriately written
-	// setter/getter.  When this is done, we need to ensure that the UnmarshalJSON
+	// setter/getter. When this is done, we need to ensure that the UnmarshalJSON
 	// is handled properly so that the state storage continues to work.
 	DesiredStatusUnsafe apicontainerstatus.ContainerStatus `json:"desiredStatus"`
 
@@ -227,7 +245,7 @@ type Container struct {
 	// NOTE: Do not access `KnownStatusUnsafe` directly.  Instead, use `GetKnownStatus`
 	// and `SetKnownStatus`.
 	// TODO KnownStatusUnsafe should probably be private with appropriately written
-	// setter/getter.  When this is done, we need to ensure that the UnmarshalJSON
+	// setter/getter. When this is done, we need to ensure that the UnmarshalJSON
 	// is handled properly so that the state storage continues to work.
 	KnownStatusUnsafe apicontainerstatus.ContainerStatus `json:"KnownStatus"`
 
@@ -273,7 +291,7 @@ type Container struct {
 	MetadataFileUpdated bool `json:"metadataFileUpdated"`
 
 	// KnownExitCodeUnsafe specifies the exit code for the container.
-	// It is exposed outside of the package so that it's marshalled/unmarshalled in
+	// It is exposed outside the package so that it's marshalled/unmarshalled in
 	// the JSON body while saving the state.
 	// NOTE: Do not access KnownExitCodeUnsafe directly. Instead, use `GetKnownExitCode`
 	// and `SetKnownExitCode`.
@@ -294,8 +312,8 @@ type Container struct {
 	// SteadyStateStatusUnsafe specifies the steady state status for the container
 	// If uninitialized, it's assumed to be set to 'ContainerRunning'. Even though
 	// it's not only supposed to be set when the container is being created, it's
-	// exposed outside of the package so that it's marshalled/unmarshalled in the
-	// the JSON body while saving the state
+	// exposed outside the package so that it's marshalled/unmarshalled in the
+	// JSON body while saving the state
 	SteadyStateStatusUnsafe *apicontainerstatus.ContainerStatus `json:"SteadyStateStatus,omitempty"`
 
 	// ContainerArn is the Arn of this container.
@@ -305,16 +323,48 @@ type Container struct {
 	// pause container
 	ContainerTornDownUnsafe bool `json:"containerTornDown"`
 
-	createdAt  time.Time
-	startedAt  time.Time
-	finishedAt time.Time
+	createdAt time.Time
+	// StartedAtUnsafe specifies the started at time of the container.
+	// It is exposed outside this container package so that it is marshalled/unmarshalled in JSON body while
+	// saving state.
+	// NOTE: Do not access StartedAtUnsafe directly. Instead, use `GetStartedAt` and `SetStartedAt`.
+	StartedAtUnsafe time.Time `json:"startedAt,omitempty"`
+	// setStartedAtOnce is used to set the value of the container's started at time only the first time SetStartedAt is
+	// invoked.
+	setStartedAtOnce sync.Once
+	finishedAt       time.Time
 
 	labels map[string]string
+
+	// ContainerHasPortRange is set to true when the container has at least 1 port range requested.
+	ContainerHasPortRange bool
+	// ContainerPortSet is a set of singular container ports that don't belong to a containerPortRange request
+	ContainerPortSet map[int]struct{}
+	// ContainerPortRangeMap is a map of containerPortRange to its associated hostPortRange
+	ContainerPortRangeMap map[string]string
+
+	// RestartPolicy is an object representing the restart policy of the container
+	RestartPolicy *restart.RestartPolicy `json:"restartPolicy,omitempty"`
+	// RestartTracker tracks this container's restart policy metadata, such
+	// as restart count and last restart time. This is only initialized if the container
+	// has a restart policy defined and enabled.
+	RestartTracker *restart.RestartTracker `json:"restartTracker,omitempty"`
+	// RestartAggregationDataForStatsUnsafe specifies the restart aggregation data used for stats of the container.
+	// It is exposed outside this container package so that it is marshalled/unmarshalled in JSON body while
+	// saving state.
+	// NOTE: Do not access RestartAggregationDataForStatsUnsafe directly. Instead, use
+	// `GetRestartAggregationDataForStats` and `SetRestartAggregationDataForStats`.
+	RestartAggregationDataForStatsUnsafe ContainerRestartAggregationDataForStats `json:"RestartAggregationDataForStats,omitempty"`
 }
 
 type DependsOn struct {
 	ContainerName string `json:"containerName"`
 	Condition     string `json:"condition"`
+}
+
+type ContainerRestartAggregationDataForStats struct {
+	LastRestartDetectedAt     time.Time       `json:"LastRestartDetectedAt,omitempty"`
+	LastStatBeforeLastRestart types.StatsJSON `json:"LastStatBeforeLastRestart,omitempty"`
 }
 
 // DockerContainer is a mapping between containers-as-docker-knows-them and
@@ -370,7 +420,7 @@ func (s *Secret) GetSecretResourceCacheKey() string {
 	return s.ValueFrom + "_" + s.Region
 }
 
-// String returns a human readable string representation of DockerContainer
+// String returns a human-readable string representation of DockerContainer
 func (dc *DockerContainer) String() string {
 	if dc == nil {
 		return "nil"
@@ -483,7 +533,7 @@ func (c *Container) ShouldPullWithExecutionRole() bool {
 		c.RegistryAuthentication.ECRAuthData.UseExecutionRole
 }
 
-// String returns a human readable string representation of this object
+// String returns a human-readable string representation of this object
 func (c *Container) String() string {
 	ret := fmt.Sprintf("%s(%s) (%s->%s)", c.Name, c.Image,
 		c.GetKnownStatus().String(), c.GetDesiredStatus().String())
@@ -493,18 +543,45 @@ func (c *Container) String() string {
 	return ret
 }
 
+func (c *Container) Fields() logger.Fields {
+	exitCode := "nil"
+	if c.GetKnownExitCode() != nil {
+		exitCode = strconv.Itoa(*c.GetKnownExitCode())
+	}
+	return logger.Fields{
+		field.ContainerName:      c.Name,
+		field.ContainerImage:     c.Image,
+		"containerKnownStatus":   c.GetKnownStatus().String(),
+		"containerDesiredStatus": c.GetDesiredStatus().String(),
+		field.ContainerExitCode:  exitCode,
+	}
+}
+
 // GetSteadyStateStatus returns the steady state status for the container. If
 // Container.steadyState is not initialized, the default steady state status
-// defined by `defaultContainerSteadyStateStatus` is returned. The 'pause'
+// defined by `defaultContainerSteadyStateStatus` is returned. In awsvpc, the 'pause'
 // container's steady state differs from that of other containers, as the
-// 'pause' container can reach its teady state once networking resources
+// 'pause' container can reach its steady state once networking resources
 // have been provisioned for it, which is done in the `ContainerResourcesProvisioned`
-// state
+// state. In bridge mode, pause containers are currently used exclusively for
+// supporting service-connect tasks. Those pause containers will have steady state
+// status "ContainerRunning" as the actual network provisioning is done by ServiceConnect
+// container (aka Appnet agent)
 func (c *Container) GetSteadyStateStatus() apicontainerstatus.ContainerStatus {
 	if c.SteadyStateStatusUnsafe == nil {
 		return defaultContainerSteadyStateStatus
 	}
 	return *c.SteadyStateStatusUnsafe
+}
+
+// SetSteadyStateStatusUnsafe allows setting container steady state status after they
+// are initially created.
+// In bridge mode, this is used by overriding the ServiceConnect container steady
+// status to ContainerResourcesProvisioned because it comes with ACS task payload and will
+// get ContainerRunning by default during unmarshalling. We need ServiceConnect container
+// to provision network resources to support SC bridge mode
+func (c *Container) SetSteadyStateStatusUnsafe(steadyState apicontainerstatus.ContainerStatus) {
+	c.SteadyStateStatusUnsafe = &steadyState
 }
 
 // IsKnownSteadyState returns true if the `KnownState` of the container equals
@@ -576,6 +653,16 @@ func (c *Container) IsEssential() bool {
 	return c.Essential
 }
 
+// RestartPolicyEnabled returns whether the restart policy is defined and enabled
+func (c *Container) RestartPolicyEnabled() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	if c.RestartPolicy == nil {
+		return false
+	}
+	return c.RestartPolicy.Enabled
+}
+
 // AWSLogAuthExecutionRole returns true if the auth is by execution role
 func (c *Container) AWSLogAuthExecutionRole() bool {
 	return c.LogsAuthStrategy == awslogsAuthExecutionRole
@@ -601,7 +688,11 @@ func (c *Container) SetStartedAt(startedAt time.Time) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	c.startedAt = startedAt
+	c.setStartedAtOnce.Do(func() {
+		if c.StartedAtUnsafe.IsZero() {
+			c.StartedAtUnsafe = startedAt
+		}
+	})
 }
 
 // SetFinishedAt sets the timestamp for container's stopped time
@@ -629,7 +720,7 @@ func (c *Container) GetStartedAt() time.Time {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
-	return c.startedAt
+	return c.StartedAtUnsafe
 }
 
 // GetFinishedAt sets the timestamp for container's stopped time
@@ -934,6 +1025,22 @@ func (c *Container) InjectV4MetadataEndpoint() {
 		fmt.Sprintf(MetadataURIFormatV4, c.V3EndpointID)
 }
 
+// InjectV1AgentAPIEndpoint injects the v1 Agent API endpoint into the container
+// as an environment variable.
+func (c *Container) InjectV1AgentAPIEndpoint() {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.ensureEnvironmentIsInitialized()
+	c.Environment[AgentURIEnvVarName] = fmt.Sprintf(AgentURIFormat, c.V3EndpointID)
+}
+
+// Initializes Environment Map if it is nil
+func (c *Container) ensureEnvironmentIsInitialized() {
+	if c.Environment == nil {
+		c.Environment = make(map[string]string)
+	}
+}
+
 // ShouldCreateWithSSMSecret returns true if this container needs to get secret
 // value from SSM Parameter Store
 func (c *Container) ShouldCreateWithSSMSecret() bool {
@@ -1007,7 +1114,7 @@ func (c *Container) MergeEnvironmentVariablesFromEnvfiles(envVarsList []map[stri
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	// create map if does not exist
+	// create map if it does not exist
 	if c.Environment == nil {
 		c.Environment = make(map[string]string)
 	}
@@ -1165,6 +1272,27 @@ func (c *Container) GetNetworkModeFromHostConfig() string {
 	return hostConfig.NetworkMode.NetworkName()
 }
 
+// GetMemoryReservationFromHostConfig returns the container memory reservation
+func (c *Container) GetMemoryReservationFromHostConfig() int64 {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	if c.DockerConfig.HostConfig == nil {
+		return 0
+	}
+
+	hostConfig := &dockercontainer.HostConfig{}
+	err := json.Unmarshal([]byte(*c.DockerConfig.HostConfig), hostConfig)
+	if err != nil {
+		seelog.Warnf("Encountered error when trying to get memory reservation for container %s: %v", c.RuntimeID, err)
+		return 0
+	}
+
+	// Soft limit is specified in MiB units but translated to bytes while being transferred to Agent
+	// Converting back to MiB
+	return hostConfig.MemoryReservation / (1024 * 1024)
+}
+
 // GetHostConfig returns the container's host config.
 func (c *Container) GetHostConfig() *string {
 	c.lock.RLock()
@@ -1289,6 +1417,87 @@ func (c *Container) UpdateManagedAgentSentStatus(agentName string, status apicon
 	return false
 }
 
+// RequiresAnyCredentialSpec checks if container needs a credentialspec resource (domain-joined or domainless)
+func (c *Container) RequiresAnyCredentialSpec() bool {
+	credSpec, err := c.getCredentialSpec()
+	if err != nil || credSpec == "" {
+		return false
+	}
+
+	return true
+}
+
+// RequiresDomainlessCredentialSpec checks if container needs a domainless credentialspec resource
+func (c *Container) RequiresDomainlessCredentialSpec() bool {
+	credSpec, err := c.getCredentialSpec()
+	if err != nil || credSpec == "" {
+		return false
+	}
+
+	return strings.HasPrefix(credSpec, credentialSpecDomainlessPrefix)
+}
+
+// GetCredentialSpec is used to retrieve the current credentialspec resource
+func (c *Container) GetCredentialSpec() (string, error) {
+	return c.getCredentialSpec()
+}
+
+func (c *Container) getCredentialSpec() (string, error) {
+	credSpecHostConfig, err := c.getCredentialSpecFromHostConfig()
+	credSpecCredentialSpecsContainerField, err2 := c.getCredentialSpecFromCredentialSpecsContainerField()
+
+	// Prefer to use CredentialSpecsContainerField because of the upcoming docker runtime deprecation
+	if err2 == nil {
+		return credSpecCredentialSpecsContainerField, nil
+	}
+
+	if err == nil {
+		return credSpecHostConfig, nil
+	}
+
+	return "", errors.New("unable to obtain credentialspec from both hostConfig and credentialSpecs")
+}
+
+func (c *Container) getCredentialSpecFromHostConfig() (string, error) {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	if c.DockerConfig.HostConfig == nil {
+		return "", errors.New("empty container hostConfig")
+	}
+
+	hostConfig := &dockercontainer.HostConfig{}
+	err := json.Unmarshal([]byte(*c.DockerConfig.HostConfig), hostConfig)
+	if err != nil || len(hostConfig.SecurityOpt) == 0 {
+		return "", errors.New("unable to obtain security options from container hostConfig")
+	}
+
+	for _, opt := range hostConfig.SecurityOpt {
+		if strings.HasPrefix(opt, credentialSpecPrefix) {
+			return opt, nil
+		}
+	}
+
+	return "", errors.New("unable to obtain credentialspec")
+}
+
+func (c *Container) getCredentialSpecFromCredentialSpecsContainerField() (string, error) {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	if c.CredentialSpecs == nil || len(c.CredentialSpecs) == 0 {
+		return "", errors.New("empty container credentialSpecs")
+	}
+
+	for _, credentialSpec := range c.CredentialSpecs {
+		if strings.HasPrefix(credentialSpec, credentialSpecPrefix) || strings.HasPrefix(credentialSpec, credentialSpecDomainlessPrefix) {
+			return credentialSpec, nil
+		}
+	}
+
+	return "", errors.New("credentialspec not found in CredentialSpecs field")
+}
+
 func (c *Container) GetManagedAgentStatus(agentName string) apicontainerstatus.ManagedAgentStatus {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
@@ -1323,4 +1532,77 @@ func (c *Container) IsContainerTornDown() bool {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	return c.ContainerTornDownUnsafe
+}
+
+func (c *Container) SetContainerHasPortRange(containerHasPortRange bool) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.ContainerHasPortRange = containerHasPortRange
+}
+
+func (c *Container) HasPortRange() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.ContainerHasPortRange
+}
+
+func (c *Container) SetContainerPortSet(containerPortSet map[int]struct{}) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.ContainerPortSet = containerPortSet
+}
+
+func (c *Container) GetContainerPortSet() map[int]struct{} {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.ContainerPortSet
+}
+
+func (c *Container) SetContainerPortRangeMap(portRangeMap map[string]string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.ContainerPortRangeMap = portRangeMap
+}
+
+func (c *Container) GetContainerPortRangeMap() map[string]string {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.ContainerPortRangeMap
+}
+
+func (c *Container) IsManagedDaemonContainer() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.Type == ContainerManagedDaemon
+}
+
+func (c *Container) GetImageName() string {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	containerImage := strings.Split(c.Image, ":")[0]
+	return containerImage
+}
+
+// Checks if the container has a resolved image manifest digest.
+// Always returns false for internal containers as those are out-of-scope of digest resolution.
+// Always returns false when container's image reference contains digest as no digest resolution is needed in that case.
+func (c *Container) DigestResolved() bool {
+	return !c.IsInternal() && c.GetImageDigest() != "" && !referenceutil.DigestExists(c.Image)
+}
+
+// GetRestartAggregationDataForStats gets the restart aggregation data for stats of a container.
+func (c *Container) GetRestartAggregationDataForStats() ContainerRestartAggregationDataForStats {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.RestartAggregationDataForStatsUnsafe
+}
+
+// SetRestartAggregationDataForStats sets the restart aggregation data for stats of a container.
+func (c *Container) SetRestartAggregationDataForStats(
+	restartAggregationDataForStats ContainerRestartAggregationDataForStats) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	c.RestartAggregationDataForStatsUnsafe = restartAggregationDataForStats
 }

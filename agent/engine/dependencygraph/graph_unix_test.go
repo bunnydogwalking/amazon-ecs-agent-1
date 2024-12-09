@@ -1,4 +1,5 @@
 //go:build linux && unit
+// +build linux,unit
 
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
@@ -19,10 +20,10 @@ import (
 	"testing"
 
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
-	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/cgroup"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -37,12 +38,19 @@ func TestVerifyCgroupDependenciesResolved(t *testing.T) {
 		ExpectedResolved bool
 	}{
 		{
-			Name:            "resource none,container pull depends on resource created",
-			TargetKnown:     apicontainerstatus.ContainerStatusNone,
-			TargetDep:       apicontainerstatus.ContainerPulled,
-			DependencyKnown: resourcestatus.ResourceStatus(cgroup.CgroupStatusNone),
-			RequiredStatus:  resourcestatus.ResourceStatus(cgroup.CgroupCreated),
-
+			Name:             "resource none, container pull depends on resource created",
+			TargetKnown:      apicontainerstatus.ContainerStatusNone,
+			TargetDep:        apicontainerstatus.ContainerPulled,
+			DependencyKnown:  resourcestatus.ResourceStatus(cgroup.CgroupStatusNone),
+			RequiredStatus:   resourcestatus.ResourceStatus(cgroup.CgroupCreated),
+			ExpectedResolved: true,
+		},
+		{
+			Name:             "resource none, current is manifest_pulled, container pull depends on resource created",
+			TargetKnown:      apicontainerstatus.ContainerManifestPulled,
+			TargetDep:        apicontainerstatus.ContainerPulled,
+			DependencyKnown:  resourcestatus.ResourceStatus(cgroup.CgroupStatusNone),
+			RequiredStatus:   resourcestatus.ResourceStatus(cgroup.CgroupCreated),
 			ExpectedResolved: false,
 		},
 		{
